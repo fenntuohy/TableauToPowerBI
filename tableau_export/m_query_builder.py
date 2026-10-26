@@ -89,6 +89,42 @@ def _m_escape_string(value):
             .replace('\n', '#(lf)'))
 
 
+_DOUBLE_ESCAPED_OPERATORS = (
+    # Tableau occasionally stores a comparison already XML-encoded, so the
+    # workbook XML carries &gt;&gt;= where the author wrote >=. ElementTree
+    # decodes that to >>=, which is invalid SQL ("WHERE a >>= 1"). Handle
+    # both the encoded and decoded spellings.
+    ('&gt;&gt;=', '>='),
+    ('&gt;&gt;', '>'),
+    ('&lt;&lt;=', '<='),
+    ('&lt;&lt;', '<'),
+    # ``>>=`` / ``<<=`` are not valid SQL in any dialect, so a decoded form is
+    # unambiguously double-encoding. A bare ``>>`` is NOT rewritten: it is a
+    # legitimate bit-shift operator, and only the encoded ``&gt;&gt;`` above
+    # proves corruption.
+    ('>>=', '>='),
+    ('<<=', '<='),
+)
+
+
+def _normalise_custom_sql(sql):
+    """Repair the two ways Tableau-stored custom SQL breaks an M literal.
+
+    1. Double-encoded XML comparison operators (``&gt;&gt;=`` -> ``>=``).
+    2. Embedded ``#"`` sequences: ``#"..."`` is an M *identifier* escape and
+       cannot appear inside a text literal. A SQL column whose name lands in
+       this shape (``WHERE "is_in_exclusion_list " = TRUE`` preceded by ``#``)
+       makes the M parser report ``Token ',' expected``. Break the sequence by
+       escaping the hash as an M character escape.
+    """
+    out = sql or ''
+    for broken, fixed in _DOUBLE_ESCAPED_OPERATORS:
+        out = out.replace(broken, fixed)
+    if '#"' in out:
+        out = out.replace('#"', '#(#)"')
+    return out
+
+
 def _m_literal(value):
     """Return *value* as an escaped M text literal."""
     return '"' + _m_escape_string(str(value)) + '"'
@@ -264,7 +300,8 @@ def _gen_m_snowflake(details, table_name, columns):
     m_query += f'    Source = Snowflake.Databases("{server}", "{warehouse}"),\n'
     m_query += f'    #"{database}" = Source{{[Name="{database}"]}}[Data],\n'
     if details.get('sql_query'):
-        m_query += f'    {safe} = Value.NativeQuery(#"{database}", {_m_literal(details["sql_query"])}, null, [EnableFolding=true]),\n'
+        _sql = _normalise_custom_sql(details["sql_query"])
+        m_query += f'    {safe} = Value.NativeQuery(#"{database}", {_m_literal(_sql)}, null, [EnableFolding=true]),\n'
     else:
         m_query += f'    #"{source_schema}" = #"{database}"{{[Name="{source_schema}"]}}[Data],\n'
         m_query += f'    {safe} = #"{source_schema}"{{[Name="{tbl}"]}}[Data],\n'
@@ -576,7 +613,8 @@ def _gen_m_custom_sql(details, table_name, columns):
     """
     server = _m_escape_string(details.get('server', 'localhost'))
     database = _m_escape_string(details.get('database', 'MyDatabase'))
-    sql_query = details.get('sql_query', f'SELECT * FROM {table_name}')
+    sql_query = _normalise_custom_sql(
+        details.get('sql_query', f'SELECT * FROM {table_name}'))
     params = details.get('params', {})  # {name: default_value}
     # Escape quotes in SQL for M string
     sql_escaped = sql_query.replace('"', '""')

@@ -1342,6 +1342,42 @@ _M_LET_RE = re.compile(r'\blet\b', re.I)
 _M_IN_RE = re.compile(r'\bin\b\s+[#\w]', re.I)
 _M_DOUBLE_COMMA = re.compile(r',\s*,')
 _M_TRAILING_COMMA_RECORD = re.compile(r',(\s*[\]\}])')
+def _sub_outside_string_literals(pattern, repl, text):
+    """Apply *pattern* only in the code portions of an M expression.
+
+    M build systems run regex repairs over the whole expression, but SQL inside
+    ``Value.NativeQuery(..., "WITH ... WHERE col = TRUE")`` is just text. A
+    repair that rewrites ``word word =`` into a quoted identifier will happily
+    mangle that SQL into ``#"WHERE col " = TRUE``, which the M parser rejects
+    with "Token ',' expected". Split on double-quoted literals (honouring M's
+    ``""`` escape) and only treat the outside segments as code.
+    """
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == '"':
+            # Walk to the closing quote, treating "" as an escaped quote.
+            j = i + 1
+            while j < n:
+                if text[j] == '"':
+                    if j + 1 < n and text[j + 1] == '"':
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            out.append(text[i:j])
+            i = j
+        else:
+            j = i
+            while j < n and text[j] != '"':
+                j += 1
+            out.append(pattern.sub(repl, text[i:j]))
+            i = j
+    return ''.join(out)
+
+
 _M_STEP_DEF_RE = re.compile(r'^\s*(#"[^"]+"|\w+)\s*=', re.M)
 _M_UNQUOTED_BAD = re.compile(r'(?<![\w#"])([A-Za-z_]\w*[ \-/&%]+\w[\w \-/&%]*)\s*=')
 _M_CRED_PATTERNS = (
@@ -1517,7 +1553,7 @@ def _heal_m_invalid_identifier_unquoted(model, recovery=None) -> int:
             changed = True
             return f'#"{ident}" ='
 
-        new_expr = _M_UNQUOTED_BAD.sub(_wrap, new_expr)
+        new_expr = _sub_outside_string_literals(_M_UNQUOTED_BAD, _wrap, new_expr)
         if changed:
             src['expression'] = new_expr
             repairs += 1

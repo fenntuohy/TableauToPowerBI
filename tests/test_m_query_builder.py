@@ -1460,3 +1460,40 @@ class TestExcelSheetNameResolution(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class TestNormaliseCustomSql(unittest.TestCase):
+    """Tableau-stored custom SQL breaks M literals in two specific ways."""
+
+    def test_double_encoded_operators_are_repaired(self):
+        from tableau_export.m_query_builder import _normalise_custom_sql
+        sql = "WHERE report_month &gt;&gt;= '2024-01-31'"
+        self.assertEqual(_normalise_custom_sql(sql),
+                         "WHERE report_month >= '2024-01-31'")
+
+    def test_decoded_double_equals_operator_is_repaired(self):
+        from tableau_export.m_query_builder import _normalise_custom_sql
+        # >>= is not valid SQL in any dialect, so it is unambiguous corruption.
+        self.assertEqual(_normalise_custom_sql("WHERE a >>= 1"), "WHERE a >= 1")
+        self.assertEqual(_normalise_custom_sql("WHERE a <<= 1"), "WHERE a <= 1")
+
+    def test_bare_bitshift_is_preserved(self):
+        from tableau_export.m_query_builder import _normalise_custom_sql
+        # A bare >> may be a legitimate Snowflake bit-shift; do not rewrite it.
+        self.assertEqual(_normalise_custom_sql("WHERE a >> 0"), "WHERE a >> 0")
+
+    def test_hash_quote_inside_sql_is_broken_up(self):
+        from tableau_export.m_query_builder import _normalise_custom_sql
+        # #"..." is an M identifier escape and must not appear in a literal.
+        sql = 'WHERE "is_in_exclusion_list " = TRUE'
+        out = _normalise_custom_sql(sql)
+        self.assertNotIn('#"', out)
+
+    def test_escaped_sql_survives_m_literal(self):
+        from tableau_export.m_query_builder import _m_literal, _normalise_custom_sql
+        sql = ('WITH a AS (SELECT * FROM t WHERE report_month >>= \'2024-01-31\') '
+               'SELECT * FROM a WHERE "col " = TRUE')
+        literal = _m_literal(_normalise_custom_sql(sql))
+        self.assertNotIn('>>=', literal)
+        self.assertNotIn('#"', literal)
+        self.assertTrue(literal.startswith('"') and literal.endswith('"'))
