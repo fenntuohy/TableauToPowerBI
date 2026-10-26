@@ -1278,6 +1278,39 @@ def _apply_semantic_enrichments(model, extra_objects, main_table_name,
             unique_measures.append(measure)
         table["measures"] = unique_measures
 
+    # Drop physical columns that Tableau itself computes.
+    #
+    # Tableau emits a <metadata-record> for calculated fields too, so they land
+    # in tables[].columns with a sourceColumn pointing at a name the source
+    # query never returns. Refresh then fails with
+    #   "The '<oii>X</oii>' column does not exist in the rowset".
+    # The field still migrates correctly as a measure (it is in
+    # extra_objects['calculations']). Remove only the physical column, never the
+    # whole table.
+    _calculated_field_names = set()
+    for _calc in (extra_objects.get('calculations') or []):
+        _raw = (_calc.get('name') or '').strip()
+        if not _raw:
+            continue
+        _names = extract_bracketed_groups(_raw)
+        _calculated_field_names.add(_names[0] if _names else _raw.strip('[]'))
+    if _calculated_field_names:
+        for table in model["model"]["tables"]:
+            kept = []
+            for col in table.get("columns", []):
+                cname = col.get("name", "")
+                # Only a physical projection can be wrong; a column with its own
+                # expression is a calculated column and stays.
+                if (cname in _calculated_field_names
+                        and col.get("sourceColumn")
+                        and not col.get("expression")):
+                    print(f"  ⚕ Self-heal: Dropped calculated-field column "
+                          f"'{cname}' from '{table.get('name','')}' "
+                          f"(not in the source rowset)")
+                    continue
+                kept.append(col)
+            table["columns"] = kept
+
     # Deduplicate columns globally with case-insensitive uniqueness (Bug #2b).
     # Column names within a table must also be unique case-insensitively.
     # When internal apostrophes create duplicates (e.g. 'Date d\'émission' becomes
