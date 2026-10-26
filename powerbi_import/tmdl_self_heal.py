@@ -696,30 +696,10 @@ def _self_heal_model(model, recovery=None):
                                     severity='info',
                                     follow_up=f"Review measure '{mname}' — MAX() may not be the best aggregation")
 
-    # 7. M query self-repair — ensure all M partitions have try/otherwise wrapping
-    for t in model.get('model', {}).get('tables', []):
-        tname = t.get('name', '')
-        for part in t.get('partitions', []):
-            src = part.get('source', {})
-            if src.get('type') != 'm':
-                continue
-            m_expr = src.get('expression', '')
-            if not m_expr or 'try' in m_expr:
-                continue  # Already wrapped or empty
-            # Only wrap partitions that have a 'let ... in' structure
-            if 'let' not in m_expr.lower():
-                continue
-            col_names = [c.get('name', '') for c in t.get('columns', []) if c.get('name')]
-            wrapped = wrap_source_with_try_otherwise(m_expr, col_names)
-            if wrapped != m_expr:
-                src['expression'] = wrapped
-                repairs += 1
-                if recovery:
-                    recovery.record('m_query', 'try_otherwise_wrap',
-                                    item_name=tname,
-                                    description=f"M partition for '{tname}' lacks error handling",
-                                    action="Wrapped Source with try...otherwise fallback",
-                                    severity='info')
+    # 7. M query self-repair — deliberately empty.
+    #    Source-level try/otherwise guards are NOT injected: they turned
+    #    connection/navigation failures into a successful empty refresh.
+    #    Errors now propagate to the refresh log, where they belong.
 
     # 8. Data type / formatString consistency
     #    A numeric formatString on a String column causes PBI Desktop to

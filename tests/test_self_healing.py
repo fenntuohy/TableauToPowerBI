@@ -546,7 +546,9 @@ class TestMQuerySelfRepair(unittest.TestCase):
         model = self._make_model_with_m_partition(m)
         repairs = _self_heal_model(model)
         expr = model['model']['tables'][0]['partitions'][0]['source']['expression']
-        self.assertIn('try', expr)
+        # Guards are no longer injected: a fallback would hide real failures.
+        self.assertEqual(expr, m)
+        self.assertNotIn('otherwise', expr)
 
     def test_already_wrapped_not_double_wrapped(self):
         from powerbi_import.tmdl_generator import _self_heal_model
@@ -572,8 +574,9 @@ class TestMQuerySelfRepair(unittest.TestCase):
         recovery = RecoveryReport("Test")
         _self_heal_model(model, recovery=recovery)
         m_repairs = [r for r in recovery.repairs if r['category'] == 'm_query']
-        self.assertTrue(len(m_repairs) >= 1)
-        self.assertEqual(m_repairs[0]['repair_type'], 'try_otherwise_wrap')
+        self.assertFalse(any(r['repair_type'] == 'try_otherwise_wrap' for r in m_repairs))
+        self.assertEqual(
+            model['model']['tables'][0]['partitions'][0]['source']['expression'], m)
 
 
 # ════════════════════════════════════════════════════════════════════

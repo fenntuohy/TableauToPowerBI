@@ -2068,16 +2068,13 @@ def m_transform_try_otherwise(step_name, expression, fallback_expression):
 
 
 def wrap_source_with_try_otherwise(m_query, empty_table_columns=None):
-    """
-    No-op: the try...otherwise pattern creates unbalanced let/in blocks that
-    Power BI Service cannot compile. The fallback #table() is not useful since
-    Snowflake credentials are configured at the service level.
+    """Compatibility no-op: return the M query unchanged.
 
-    Args:
-        m_query: str — Complete M query (let ... in ...)
-        empty_table_columns: optional list of column name strings for the fallback table
-    Returns:
-        str — Unmodified M query
+    Automatic Source fallbacks used to turn connection/navigation errors into
+    successful empty refreshes. They are no longer injected for any connector.
+    Keep this helper and its signature for existing callers; the legacy
+    ``empty_table_columns`` argument is ignored. Authored ``try`` expressions
+    and targeted value-level error handling are preserved verbatim.
     """
     return m_query
     if remaining_idx < len(lines):

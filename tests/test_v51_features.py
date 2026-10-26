@@ -292,9 +292,9 @@ class TestMQueryFallback(unittest.TestCase):
         columns = [{'name': 'ID', 'datatype': 'integer'}, {'name': 'Name', 'datatype': 'string'}]
         raw = _gen_m_fallback({'_conn_type': 'CustomDB'}, 'MyTable', columns)
         wrapped = wrap_source_with_try_otherwise(raw, ['ID', 'Name'])
-        self.assertIn('try', wrapped)
-        self.assertIn('otherwise', wrapped)
-        self.assertIn('#table({"ID", "Name"}, {})', wrapped)
+        # No fallback guard is added; connector errors must surface.
+        self.assertEqual(wrapped, raw)
+        self.assertNotIn('otherwise', wrapped)
 
     def test_fallback_has_conn_type(self):
         columns = [{'name': 'Col1', 'datatype': 'string'}]

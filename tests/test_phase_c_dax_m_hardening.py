@@ -385,27 +385,26 @@ in
         self.assertIn('Table.ReplaceErrorValues', result)
 
     def test_wrap_source_with_try_otherwise(self):
-        """wrap_source_with_try_otherwise wraps Source step."""
+        """The compatibility helper must not mask SQL/navigation failures."""
         m_query = '''let
     Source = Sql.Database("server", "db"),
     #"Nav" = Source{[Schema="dbo", Item="Orders"]}[Data]
 in
     #"Nav"'''
         result = wrap_source_with_try_otherwise(m_query, ['OrderID', 'Sales'])
-        self.assertIn('try', result)
-        self.assertIn('otherwise', result)
-        self.assertIn('"OrderID"', result)
-        self.assertIn('"Sales"', result)
+        self.assertEqual(result, m_query)
+        self.assertNotIn('otherwise', result)
 
     def test_wrap_source_no_columns(self):
-        """wrap_source_with_try_otherwise without columns uses empty table."""
+        """A file-backed Excel failure must not become a successful empty load."""
         m_query = '''let
     Source = Excel.Workbook(File.Contents("data.xlsx"))
 in
     Source'''
         result = wrap_source_with_try_otherwise(m_query)
-        self.assertIn('try', result)
-        self.assertIn('#table({}, {})', result)
+        self.assertEqual(result, m_query)
+        self.assertNotIn('otherwise', result)
+        self.assertNotIn('#table(', result)
 
     def test_wrap_source_no_match(self):
         """wrap_source_with_try_otherwise returns unchanged if no Source step."""
@@ -432,12 +431,9 @@ in
         result = wrap_source_with_try_otherwise(
             m_query, ['Revenue "net" total', 'Plain Column'])
 
-        # The quoted name survives, escaped M-style.
-        self.assertIn('"Revenue ""net"" total"', result)
-        self.assertNotIn('"Revenue "net" total"', result)
-        # And no bare quote remains inside the fallback column list.
-        fallback = result[result.index('otherwise'):]
-        self.assertEqual(fallback.count('"') % 2, 0)
+        # No fallback table is emitted, so no column list can be malformed.
+        self.assertEqual(result, m_query)
+        self.assertNotIn('otherwise', result)
 
 
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
