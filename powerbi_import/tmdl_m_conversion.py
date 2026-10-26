@@ -35,8 +35,14 @@ _DAX_TO_M_TYPE = {
 
 
 def _split_dax_args(s):
-    """Split a string at top-level commas, respecting parentheses and quotes."""
-    parts, depth, current, in_str = [], 0, [], False
+    """Split a string at top-level commas, respecting (), {} and quotes.
+
+    Brace tracking is not optional: a DAX set literal (``x IN {"a", "b"}``)
+    contains commas that are part of the *argument*, not separators. Ignoring
+    them splits ``IN {"a", "b", "c"}`` into three "arguments", and the caller
+    then renders a bogus ``if ... then ... else ...`` from the fragments.
+    """
+    parts, depth, brace, current, in_str = [], 0, 0, [], False
     for ch in s:
         if in_str:
             current.append(ch)
@@ -51,7 +57,13 @@ def _split_dax_args(s):
         elif ch == ')':
             depth -= 1
             current.append(ch)
-        elif ch == ',' and depth == 0:
+        elif ch == '{':
+            brace += 1
+            current.append(ch)
+        elif ch == '}':
+            brace -= 1
+            current.append(ch)
+        elif ch == ',' and depth == 0 and brace == 0:
             parts.append(''.join(current).strip())
             current = []
         else:

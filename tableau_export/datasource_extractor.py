@@ -194,8 +194,60 @@ def extract_datasource(datasource_elem, twbx_path=None):
     # that appear in <metadata-record> elements and <cols><map> but have no
     # <column> element, so they are not extracted by Phase 2.
     _ensure_calc_referenced_columns(datasource)
-    
+
+    # An .hyper extract inside a live Snowflake datasource is a cached copy of a
+    # table we already reach directly. Left as-is it migrates to an inline
+    # #table() stub with no rows, so the report publishes blank and refresh
+    # silently "succeeds". Rebind it to the live query instead.
+    _rebind_hyper_extracts_to_live_source(datasource)
+
     return datasource
+
+
+def _rebind_hyper_extracts_to_live_source(datasource):
+    """Point Hyper extract tables at the live table they were extracted from.
+
+    A Tableau Hyper extract (``class='hyper'``) carries no queryable connection
+    of its own; the rows live in a ``.hyper`` file we cannot enumerate without
+    the extract. When the same datasource also exposes the underlying table
+    over a real connection, that is strictly better: it refreshes, and it keeps
+    the extract's derived columns intact because those are rebuilt downstream.
+
+    Rebind is only attempted when there is exactly one non-Hyper table to
+    inherit from, so a multi-table datasource with an ambiguous source is left
+    alone rather than silently wired to the wrong table.
+    """
+    tables = datasource.get('tables', [])
+    if not tables:
+        return
+
+    hyper_tables = [t for t in tables
+                    if (t.get('connection_details') or {}).get('type') == 'HYPER']
+    if not hyper_tables:
+        return
+
+    live_tables = [t for t in tables
+                   if (t.get('connection_details') or {}).get('type') not in
+                   ('HYPER', '', None)]
+    if len(live_tables) != 1:
+        return
+
+    live = live_tables[0]
+    live_details = live.get('connection_details') or {}
+    live_cols = {c.get('name', '').upper() for c in live.get('columns', [])}
+
+    for table in hyper_tables:
+        cols = {c.get('name', '').upper() for c in table.get('columns', [])}
+        # Only rebind when the extract genuinely mirrors the live table, i.e.
+        # it adds at most derived columns and drops none.
+        if not cols or not cols.issuperset(live_cols & cols) or not (cols & live_cols):
+            continue
+        missing = cols - live_cols
+        if len(missing) > 0 and any(not m.startswith('CALCULATION_') for m in missing):
+            continue
+        table['connection_details'] = dict(live_details)
+        table['source_table'] = live.get('source_table') or live.get('name', '')
+        table['rebound_from_hyper'] = True
 
 
 def _sanitize_caption_for_table_name(caption):

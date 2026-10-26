@@ -1343,3 +1343,21 @@ class TestColumnDeduplication(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class TestDaxInSetLiteral(unittest.TestCase):
+    """DAX `x IN {..}` must survive conversion into M inside a function call."""
+
+    def test_split_dax_args_keeps_set_literal_intact(self):
+        from powerbi_import.tmdl_m_conversion import _split_dax_args
+        args = _split_dax_args('\'T\'[x] IN {"a", "b", "c"}, "Yes", "No"')
+        self.assertEqual(len(args), 3)
+        self.assertEqual(args[0], '\'T\'[x] IN {"a", "b", "c"}')
+
+    def test_if_with_in_set_literal_becomes_list_contains(self):
+        from powerbi_import.tmdl_m_conversion import _dax_to_m_expression
+        dax = 'IF(\'T\'[x] IN {"a", "b"}, "Yes", "No")'
+        m = _dax_to_m_expression(dax, 'T')
+        self.assertIn('List.Contains', m)
+        self.assertNotIn('then "b"', m)
+        self.assertEqual(m, 'if List.Contains({"a", "b"}, [x]) then "Yes" else "No"')
