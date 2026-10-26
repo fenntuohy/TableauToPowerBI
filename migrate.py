@@ -295,7 +295,8 @@ def _resolve_published_datasources(args):
         return True
 
     published = [d for d in datasources
-                 if (d.get('connection') or {}).get('type') == 'Tableau Server']
+                 if ((d.get('connection') or {}).get('type') == 'Tableau Server'
+                     or d.get('published_datasource_id'))]
     if not published:
         print("  ℹ No published datasources to resolve")
         return True

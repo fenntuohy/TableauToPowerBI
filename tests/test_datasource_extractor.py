@@ -215,6 +215,208 @@ class TestParseConnectionClass(unittest.TestCase):
         self.assertEqual(result['type'], 'Snowflake')
         self.assertEqual(result['details']['warehouse'], 'wh')
 
+    def test_snowflake_relation_keeps_real_source_object(self):
+        elem = ET.fromstring('''
+            <datasource>
+              <connection class="snowflake" dbname="PROD" schema="REPORTING" />
+              <relation type="table" name="Extract" table="[REPORTING].[REAL_TABLE]" />
+            </datasource>
+        ''')
+        table = extract_datasource(elem)['tables'][0]
+        self.assertEqual(table['name'], 'Extract')
+        self.assertEqual(table['source_table'], 'REPORTING.REAL_TABLE')
+
+    def test_custom_sql_is_attached_to_its_table_relation(self):
+        elem = ET.fromstring('''
+            <datasource>
+              <connection class="snowflake" dbname="PROD" schema="REPORTING">
+                <relation type="table" name="Extract" table="[Custom SQL Query]">
+                  <relation type="text" name="Custom SQL Query">
+                    WITH orders AS (SELECT id FROM source) SELECT id FROM orders
+                  </relation>
+                </relation>
+              </connection>
+            </datasource>
+        ''')
+        table = extract_datasource(elem)['tables'][0]
+        self.assertIn('WITH orders AS', table['custom_sql'])
+        from m_query_builder import generate_power_query_m
+        m_query = generate_power_query_m(
+            {'type': 'Snowflake', 'details': {
+                'server': 'acct', 'database': 'PROD', 'schema': 'REPORTING',
+                'warehouse': 'WH',
+            }},
+            table,
+        )
+        self.assertIn('Value.NativeQuery', m_query)
+        self.assertIn('WITH orders AS', m_query)
+
+    def test_standalone_custom_sql_relation_is_a_source_table(self):
+        elem = ET.fromstring('''
+            <datasource>
+              <connection class="snowflake" dbname="PROD" schema="REPORTING">
+                <relation type="text" name="Query" connection="conn1">
+                  SELECT id FROM source_table
+                </relation>
+              </connection>
+            </datasource>
+        ''')
+        table = extract_datasource(elem)['tables'][0]
+        self.assertEqual(table['name'], 'Query')
+        self.assertEqual(table['custom_sql'], 'SELECT id FROM source_table')
+
+    def test_duplicate_hyper_mirror_does_not_become_a_second_physical_table(self):
+        elem = ET.fromstring('''
+            <datasource>
+              <connection class="federated">
+                <named-connections>
+                  <named-connection name="warehouse">
+                    <connection class="snowflake" server="acct" dbname="PROD"
+                                 schema="REPORTING" warehouse="WH" />
+                  </named-connection>
+                </named-connections>
+                <relation type="table" name="Invoices" connection="warehouse"
+                          table="[REPORTING].[INVOICES]">
+                  <columns><column name="ID" datatype="integer" /></columns>
+                </relation>
+              </connection>
+              <connection class="hyper" dbname="extract-id" schema="Extract">
+                <relation type="table" name="Extract" table="[Extract].[Extract]">
+                  <columns><column name="ID" datatype="integer" /></columns>
+                </relation>
+              </connection>
+            </datasource>
+        ''')
+        tables = extract_datasource(elem)['tables']
+        self.assertEqual([table['name'] for table in tables], ['Invoices'])
+
+    def test_distinct_hyper_table_is_preserved(self):
+        elem = ET.fromstring('''
+            <datasource>
+              <connection class="federated">
+                <named-connections><named-connection name="warehouse">
+                  <connection class="snowflake" server="acct" dbname="PROD"
+                               schema="REPORTING" warehouse="WH" />
+                </named-connection></named-connections>
+                <relation type="table" name="Invoices" connection="warehouse"
+                          table="[REPORTING].[INVOICES]">
+                  <columns><column name="ID" datatype="integer" /></columns>
+                </relation>
+              </connection>
+              <connection class="hyper" dbname="extract-id" schema="Extract">
+                <relation type="table" name="Extract" table="[Extract].[Extract]">
+                  <columns><column name="ID" datatype="integer" />
+                           <column name="LOCAL_NOTE" datatype="string" /></columns>
+                </relation>
+              </connection>
+            </datasource>
+        ''')
+        tables = extract_datasource(elem)['tables']
+        self.assertEqual({table['name'] for table in tables}, {'Invoices', 'Extract'})
+        extract = next(table for table in tables if table['name'] == 'Extract')
+        self.assertEqual(extract['connection_details']['type'], 'HYPER')
+
+    def test_hyper_connection_metadata_does_not_replace_real_connection(self):
+        elem = ET.fromstring('''
+            <datasource name="FederatedSource" caption="Invoices">
+              <connection class="federated">
+                <named-connections><named-connection name="warehouse">
+                  <connection class="snowflake" server="acct" dbname="PROD"
+                               schema="REPORTING" warehouse="WH" />
+                </named-connection></named-connections>
+                <relation type="table" name="Invoices" connection="warehouse"
+                          table="[REPORTING].[INVOICES]">
+                  <columns><column name="ID" datatype="integer" /></columns>
+                </relation>
+                <connection class="hyper" dbname="extract-id" schema="Extract"
+                            tablename="Extract">
+                  <relation type="table" name="Extract" table="[Extract].[Extract]">
+                    <columns><column name="ID" datatype="integer" /></columns>
+                  </relation>
+                </connection>
+              </connection>
+            </datasource>
+        ''')
+        datasource = extract_datasource(elem)
+        self.assertEqual(datasource['connection']['type'], 'Snowflake')
+        self.assertEqual(datasource['tables'][0]['connection_details']['type'], 'Snowflake')
+
+    def test_extract_hyper_table_without_matching_live_schema_is_preserved(self):
+        elem = ET.fromstring('''
+            <datasource name="Source" caption="Source">
+              <connection class="federated">
+                <named-connections><named-connection name="warehouse">
+                  <connection class="snowflake" server="acct" dbname="PROD"
+                               schema="REPORTING" warehouse="WH" />
+                </named-connection></named-connections>
+                <relation type="table" name="Invoices" connection="warehouse"
+                          table="[REPORTING].[INVOICES]">
+                  <columns><column name="ID" datatype="integer" /></columns>
+                </relation>
+              </connection>
+              <connection class="hyper" dbname="extract-id" schema="Extract"
+                          tablename="Extract">
+                <relation type="table" name="Extract" table="[Extract].[Extract]">
+                  <columns><column name="LOCAL_NOTE" datatype="string" /></columns>
+                </relation>
+              </connection>
+            </datasource>
+        ''')
+        tables = extract_datasource(elem)['tables']
+        self.assertEqual({table['name'] for table in tables}, {'Invoices', 'Extract'})
+
+    def test_embedded_hyper_connection_is_mapped_and_does_not_replace_snowflake(self):
+        elem = ET.fromstring('''
+            <datasource name="FederatedSource" caption="Invoices">
+              <connection class="federated">
+                <named-connections><named-connection name="warehouse">
+                  <connection class="snowflake" server="acct" dbname="PROD"
+                               schema="REPORTING" warehouse="WH" />
+                </named-connection></named-connections>
+                <relation type="table" name="Invoices" connection="warehouse"
+                          table="[REPORTING].[INVOICES]">
+                  <columns><column name="ID" datatype="integer" /></columns>
+                </relation>
+                <connection class="hyper" dbname="extract-id" schema="Extract"
+                            tablename="Extract">
+                  <relation type="table" name="Extract" table="[Extract].[Extract]">
+                    <columns><column name="ID" datatype="integer" /></columns>
+                  </relation>
+                </connection>
+              </connection>
+            </datasource>
+        ''')
+        datasource = extract_datasource(elem)
+        self.assertEqual(datasource['connection']['type'], 'Snowflake')
+        self.assertEqual(datasource['tables'][0]['connection_details']['type'], 'Snowflake')
+        self.assertEqual([t['name'] for t in datasource['tables']], ['Invoices'])
+
+    def test_federated_datasource_with_nested_hyper_mirror(self):
+        elem = ET.fromstring('''
+            <datasource name="FederatedSource" caption="Invoices">
+              <connection class="federated">
+                <named-connections><named-connection name="warehouse">
+                  <connection class="snowflake" server="acct" dbname="PROD"
+                               schema="REPORTING" warehouse="WH" />
+                </named-connection></named-connections>
+                <relation type="table" name="Invoices" connection="warehouse"
+                          table="[REPORTING].[INVOICES]">
+                  <columns><column name="ID" datatype="integer" /></columns>
+                </relation>
+                <connection class="hyper" dbname="extract-id" schema="Extract"
+                            tablename="Extract">
+                  <relation type="table" name="Extract" table="[Extract].[Extract]">
+                    <columns><column name="ID" datatype="integer" /></columns>
+                  </relation>
+                </connection>
+              </connection>
+            </datasource>
+        ''')
+        datasource = extract_datasource(elem)
+        self.assertEqual(datasource['connection']['type'], 'Snowflake')
+        self.assertEqual([t['name'] for t in datasource['tables']], ['Invoices'])
+        self.assertEqual(datasource['tables'][0]['connection_details']['type'], 'Snowflake')
+
     def test_sapbw_connection(self):
         xml = '<connection class="sapbw" server="sap.co" />'
         elem = ET.fromstring(xml)

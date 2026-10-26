@@ -804,6 +804,48 @@ class TestBuildVisualQuery(unittest.TestCase):
         projection = result['queryState']['Tooltips']['projections'][0]
         self.assertEqual(projection['field']['Measure']['Property'], '% of Total Revenue')
 
+    def test_pcto_text_shelf_is_promoted_to_generated_value_measure(self):
+        self.gen._actual_bim_symbols = {
+            ('INT_LOGISTICS_PERFORMANCE_BASE', 'Delivery Category'),
+            ('INT_LOGISTICS_PERFORMANCE_BASE', '% of Total PDD [#] (copy)_123'),
+        }
+        self.gen._actual_bim_measure_names = {'% of Total PDD [#] (copy)_123'}
+        self.gen._bim_measure_names = set(self.gen._actual_bim_measure_names)
+        self.gen._quick_table_calc_measure_map = {
+            'sqlproxy.ds\x1fPDD [#] (copy)_123':
+                ('INT_LOGISTICS_PERFORMANCE_BASE', '% of Total PDD [#] (copy)_123'),
+        }
+        result = self._query('tableEx', [
+            {'name': 'Delivery Category', 'shelf': 'rows'},
+            {'name': 'PDD [#] (copy)_123', 'shelf': 'text', 'table_calc': 'pcto',
+             'datasource': 'sqlproxy.ds'},
+        ])
+        values = result['queryState']['Values']['projections']
+        self.assertEqual(len(values), 2)
+        self.assertEqual(values[-1]['field']['Measure']['Property'],
+                         '% of Total PDD [#] (copy)_123')
+
+    def test_pcto_generated_measure_binding_survives_tmdl_lineage_handoff(self):
+        self.gen._actual_bim_symbols = {
+            ('INT_LOGISTICS_PERFORMANCE_BASE', 'Delivery Category'),
+            ('INT_LOGISTICS_PERFORMANCE_BASE', '% of Total PDD [#] (copy)_123'),
+        }
+        self.gen._actual_bim_measure_names = {'% of Total PDD [#] (copy)_123'}
+        self.gen._bim_measure_names = set(self.gen._actual_bim_measure_names)
+        self.gen._quick_table_calc_measure_map = {
+            'sqlproxy.ds\x1fPDD [#] (copy)_123':
+                ('INT_LOGISTICS_PERFORMANCE_BASE', '% of Total PDD [#] (copy)_123'),
+        }
+        result = self._query('clusteredBarChart', [
+            {'name': 'Delivery Category', 'shelf': 'rows'},
+            {'name': 'PDD [#] (copy)_123', 'shelf': 'text', 'table_calc': 'pcto',
+             'datasource': 'sqlproxy.ds'},
+        ])
+        self.assertIn('Y', result['queryState'])
+        self.assertEqual(
+            result['queryState']['Y']['projections'][0]['field']['Measure']['Property'],
+            '% of Total PDD [#] (copy)_123')
+
     def test_scatter_uses_details_for_point_grouping(self):
         worksheet = {'chart_type': 'scatter', 'fields': [
             {'name': 'Player'}, {'name': 'ASST'}, {'name': 'BLK'},

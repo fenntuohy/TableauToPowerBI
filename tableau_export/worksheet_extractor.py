@@ -15,7 +15,38 @@ from extract_primitives import (
     _MARK_ENCODINGS,
     _read_filter_condition,
     _strip_brackets,
+    extract_bracketed_groups,
 )
+
+
+_DATASOURCE_FIELD_REF_RE = re.compile(
+    r'\[((?:[^\]]|\]\])*)\]\.\[((?:[^\]]|\]\])*)\]'
+    r'(?:\.\[((?:[^\]]|\]\])*)\])?'
+)
+
+
+def _extract_datasource_field_refs(text):
+    """Return datasource/field/(optional instance) refs with escaped brackets decoded."""
+    return [tuple(part.replace(']]', ']') if part else '' for part in match)
+            for match in _DATASOURCE_FIELD_REF_RE.findall(text or '')]
+
+
+def _clean_datasource_field_ref(raw):
+    """Clean derivations/suffixes after escaped bracket parsing has found the field."""
+    raw = re.sub(
+        r'^(pcto|pctd|diff|running_sum|running_avg|running_count|running_min|running_max|rank|rank_unique|rank_dense):'
+        r'(sum|avg|count|min|max|countd)?:?', '', raw)
+    raw = re.sub(
+        r'^(none|sum|avg|count|cnt|ctd|countd|min|max|usr|yr|mn|dy|qr|wk|attr|md|mdy|hms|hr|mt|sc|thr|trunc|tyr|tqr|tmn|tdy|twk):',
+        '', raw)
+    return re.sub(r'(?::(?:vtavg|nk|qk|ok|fn|tn))+(?::\d+)?$', '', raw)
+
+
+def _tableau_identifier(raw):
+    """Decode a standalone Tableau identifier, including escaped brackets."""
+    groups = extract_bracketed_groups(raw or '')
+    value = groups[0] if groups else (raw or '').strip('[]')
+    return value.replace('\\#', '#')
 
 
 def extract_worksheet_fields(worksheet):
@@ -60,11 +91,11 @@ def extract_worksheet_fields(worksheet):
         if shelf_text:
             # Text contains refs like [datasource].[field:type]
             # or three-part [datasource].[column].[aggregation:instance:suffix]
-            # Use a regex that captures 2 or 3 bracket groups.
-            three_part_re = r'\[([^\]]+)\]\.\[([^\]]+)\](?:\.\[([^\]]+)\])?'
-            refs = re.findall(three_part_re, shelf_text)
+            # Split bracket groups with Tableau's escaped-`]` handling; field
+            # captions can contain literal brackets such as PDD [#].
+            refs = _extract_datasource_field_refs(shelf_text)
             for match in refs:
-                ds_ref, field_ref, instance_ref = match[0], match[1], match[2]
+                ds_ref, field_ref, instance_ref = match
 
                 # Three-part ref: [ds].[__tableau_internal_object_id__].[cnt:...:qk]
                 # means COUNT(*) on the table rows.
@@ -129,13 +160,11 @@ def extract_worksheet_fields(worksheet):
                 column = enc_elem.get('column', '')
                 if column:
                     # Extract [datasource].[field]
-                    col_refs = re.findall(r'\[([^\]]+)\]\.\[([^\]]+)\]', column)
+                    col_refs = _extract_datasource_field_refs(column)
                     if col_refs:
                         raw = col_refs[0][1]
                         table_calc_match = re.match(table_calc_re, raw)
-                        clean = re.sub(table_calc_re, '', raw)
-                        clean = re.sub(derivation_re, '', clean)
-                        clean = re.sub(suffix_re, '', clean)
+                        clean = _clean_datasource_field_ref(raw)
                         entry = {
                             'name': clean,
                             'shelf': enc_type,
@@ -158,15 +187,14 @@ def extract_worksheet_fields(worksheet):
         ref = (slice_elem.text or '').strip()
         if not ref:
             continue
-        col_refs = re.findall(r'\[([^\]]+)\]\.\[([^\]]+)\]', ref)
+        col_refs = _extract_datasource_field_refs(ref)
         if not col_refs:
             continue
-        ds_ref, field_ref = col_refs[0]
+        ds_ref, field_ref, _instance = col_refs[0]
         # Detect aggregation prefix (cnt:, sum:, etc.)
         agg_prefix_match = re.match(r'^(cnt|sum|avg|min|max|countd|median|attr|stdev|stdevp|var|varp):', field_ref)
         shelf_agg = agg_prefix_match.group(1) if agg_prefix_match else None
-        clean = re.sub(derivation_re, '', field_ref)
-        clean = re.sub(suffix_re, '', clean)
+        clean = _clean_datasource_field_ref(field_ref)
         if not clean or clean.startswith('__tableau_internal'):
             continue
         if (clean, ds_ref) in existing_for_slices:
@@ -187,10 +215,9 @@ def extract_worksheet_fields(worksheet):
         col_ref = lod_elem.get('column', '')
         if not col_ref:
             continue
-        col_refs = re.findall(r'\[([^\]]+)\]\.\[([^\]]+)\]', col_ref)
+        col_refs = _extract_datasource_field_refs(col_ref)
         if col_refs:
-            clean = re.sub(derivation_re, '', col_refs[0][1])
-            clean = re.sub(suffix_re, '', clean)
+            clean = _clean_datasource_field_ref(col_refs[0][1])
             # Strip multi-part instance qualifiers (e.g. :qk:1, :nk:2)
             clean = re.sub(r':(nk|qk|ok|fn|tn):\d+$', '', clean)
             if clean and clean not in existing_names:
@@ -219,20 +246,100 @@ def extract_worksheet_fields(worksheet):
         # Collect existing field names to avoid duplicates
         existing_names = {f.get('name', '') for f in fields}
         expanded_any = False
-        for dep in worksheet.findall('.//datasource-dependencies'):
+
+        # The worksheet filter on :Measure Names is the authoritative list of
+        # visible Measure Values. Preserve that order and exclude hidden measure
+        # instances before falling back to every dependency instance.
+        selected_instances = []
+        for filter_elem in worksheet.findall('.//filter'):
+            if ':Measure Names' not in filter_elem.get('column', ''):
+                continue
+            for member in filter_elem.findall('.//groupfilter[@function="member"]'):
+                value = member.get('member', '').strip('"').replace('\\#', '#')
+                refs = _extract_datasource_field_refs(value)
+                if not refs:
+                    continue
+                _ds, field_ref, instance_ref = refs[0]
+                match = re.match(r'^(?:usr|sum|avg|count|cnt|countd|min|max|attr):(.+)$', field_ref)
+                if match:
+                    field_ref = match.group(1)
+                field_ref = re.sub(r'(?::(?:vtavg|nk|qk|ok|fn|tn))+(?::\d+)?$', '', field_ref)
+                field_ref = re.sub(r'^(?:usr|sum|avg|count|cnt|countd|min|max|attr):', '', field_ref)
+                selected_instances.append((
+                    _tableau_identifier(field_ref),
+                    _tableau_identifier(instance_ref),
+                ))
+
+        if selected_instances:
+            dependency_columns = {}
+            for dep in worksheet.findall('.//datasource-dependencies'):
+                for ci in dep.findall('column-instance'):
+                    dependency_columns[(
+                        _tableau_identifier(ci.get('column', '')),
+                        _tableau_identifier(ci.get('name', '')),
+                    )] = (ci, dep.get('datasource', ''))
+            for col_name, instance_name in selected_instances:
+                if col_name in existing_names:
+                    continue
+                instance_data = dependency_columns.get((col_name, instance_name))
+                instance, ds_ref = instance_data if instance_data else (None, '')
+                deriv = instance.get('derivation', '') if instance is not None else ''
+                if deriv not in agg_derivations:
+                    deriv = 'User'
+                field_entry = {
+                    'name': col_name,
+                    'shelf': 'measure_value',
+                    'datasource': ds_ref,
+                }
+                agg_key = deriv.lower() if deriv != 'User' else ''
+                if agg_key:
+                    field_entry['aggregation'] = agg_key
+                fields.append(field_entry)
+                existing_names.add(col_name)
+                expanded_any = True
+
+        if not selected_instances:
+            for dep in worksheet.findall('.//datasource-dependencies'):
+                ds_ref = dep.get('datasource', '')
+                measure_cols = {
+                    _tableau_identifier(col.get('name', ''))
+                    for col in dep.findall('column')
+                    if col.get('role', '') == 'measure'
+                }
+                for instance in dep.findall('column-instance'):
+                    if instance.get('derivation') not in agg_derivations:
+                        continue
+                    col_name = _tableau_identifier(instance.get('column', ''))
+                    if (not col_name or col_name.startswith('__tableau_internal')
+                            or col_name in existing_names
+                            or (col_name not in measure_cols
+                                and instance.get('derivation') != 'User')):
+                        continue
+                    field_entry = {
+                        'name': col_name,
+                        'shelf': 'measure_value',
+                        'datasource': ds_ref,
+                    }
+                    if instance.get('derivation') != 'User':
+                        field_entry['aggregation'] = instance.get('derivation', '').lower()
+                    fields.append(field_entry)
+                    existing_names.add(col_name)
+                    expanded_any = True
+
+        for dep in (() if selected_instances else worksheet.findall('.//datasource-dependencies')):
             ds_ref = dep.get('datasource', '')
             # Build a set of column names with role='measure'
             measure_cols = set()
             for col_elem in dep.findall('column'):
                 if col_elem.get('role', '') == 'measure':
-                    measure_cols.add(col_elem.get('name', '').strip('[]'))
+                    measure_cols.add(_tableau_identifier(col_elem.get('name', '')))
             # Also include calculation columns (User derivation) —
             # they may have role='measure' in column definition
             for ci in dep.findall('column-instance'):
                 deriv = ci.get('derivation', '')
                 if deriv not in agg_derivations:
                     continue
-                col_name = ci.get('column', '').strip('[]')
+                col_name = _tableau_identifier(ci.get('column', ''))
                 # Skip internal Tableau columns
                 if col_name.startswith('__tableau_internal'):
                     continue
@@ -257,13 +364,13 @@ def extract_worksheet_fields(worksheet):
         # Fallback: if no <column-instance> entries provided explicit
         # aggregations (common for minimal/hand-authored TWBs), expand
         # every <column role='measure'> directly with a default Sum.
-        if not expanded_any:
+        if not selected_instances and not expanded_any:
             for dep in worksheet.findall('.//datasource-dependencies'):
                 ds_ref = dep.get('datasource', '')
                 for col_elem in dep.findall('column'):
                     if col_elem.get('role', '') != 'measure':
                         continue
-                    col_name = col_elem.get('name', '').strip('[]')
+                    col_name = _tableau_identifier(col_elem.get('name', ''))
                     if not col_name or col_name.startswith('__tableau_internal'):
                         continue
                     if col_name in existing_names:

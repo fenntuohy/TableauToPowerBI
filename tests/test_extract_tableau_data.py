@@ -28,6 +28,7 @@ from extract_tableau_data import (
     _scan_delimited_sample,
 )
 import extract_tableau_data as etd
+from worksheet_extractor import extract_worksheet_fields
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -52,6 +53,26 @@ class TestCleanFieldRef(unittest.TestCase):
 
     def test_trunc_prefix(self):
         self.assertEqual(_clean_field_ref('trunc:Date'), 'Date')
+
+    def test_field_name_with_literal_brackets_survives_table_calc_prefix(self):
+        worksheet = ET.fromstring('''
+        <worksheet name="Push">
+          <table><cols>[sqlproxy.ds].[pcto:usr:PDD [#]] (copy)_123:qk:2]</cols></table>
+        </worksheet>''')
+        fields = extract_worksheet_fields(worksheet)
+        self.assertEqual(len(fields), 1)
+        self.assertEqual(fields[0]['name'], 'PDD [#] (copy)_123')
+        self.assertEqual(fields[0]['table_calc'], 'pcto')
+
+    def test_text_shelf_with_nested_bracket_field_parses_as_measure(self):
+        worksheet = ET.fromstring('''
+        <worksheet name="Push">
+          <table><cols>[sqlproxy.ds].[DELIVERY_CATEGORY]</cols></table>
+          <pane><encodings><text column="[sqlproxy.ds].[pcto:usr:PDD [#]] (copy)_123:qk:2]"/></encodings></pane>
+        </worksheet>''')
+        fields = extract_worksheet_fields(worksheet)
+        pcto = next(field for field in fields if field.get('table_calc') == 'pcto')
+        self.assertEqual(pcto['name'], 'PDD [#] (copy)_123')
 
 
 class TestStripBrackets(unittest.TestCase):
@@ -240,6 +261,27 @@ class TestDetermineChartType(unittest.TestCase):
         </worksheet>''')
         self.assertEqual(self.ext.determine_chart_type(ws), 'lineChart')
 
+    def test_automatic_generated_date_uses_continuous_shelf_metadata(self):
+        template = '''<worksheet><table><view>
+          <datasource-dependencies datasource="ds">
+            <column name="[Calculation_123]" caption="Week date" datatype="{datatype}"/>
+            <column-instance name="[none:Calculation_123:qk]" column="[Calculation_123]" type="{kind}"/>
+          </datasource-dependencies></view>
+          <cols>[ds].[none:Calculation_123:qk]</cols>
+          <rows>[ds].[usr:Calculation_456:qk]</rows>
+          <panes><pane><mark class="{mark}"/></pane></panes>
+        </table></worksheet>'''
+        for datatype, kind, mark, expected in (
+            ('date', 'quantitative', 'Automatic', 'lineChart'),
+            ('datetime', 'quantitative', 'Automatic', 'lineChart'),
+            ('date', 'ordinal', 'Automatic', 'clusteredBarChart'),
+            ('integer', 'quantitative', 'Automatic', 'clusteredBarChart'),
+            ('date', 'quantitative', 'Bar', 'clusteredColumnChart'),
+        ):
+            with self.subTest(datatype=datatype, kind=kind, mark=mark):
+                ws = ET.fromstring(template.format(datatype=datatype, kind=kind, mark=mark))
+                self.assertEqual(self.ext.determine_chart_type(ws), expected)
+
     def test_automatic_no_fields_is_table(self):
         ws = ET.fromstring('''
         <worksheet>
@@ -247,6 +289,47 @@ class TestDetermineChartType(unittest.TestCase):
             <table><cols></cols><rows></rows></table>
         </worksheet>''')
         self.assertEqual(self.ext.determine_chart_type(ws), 'table')
+
+    def test_measure_names_multiple_values_is_a_table(self):
+        ws = ET.fromstring('''<worksheet><table>
+          <cols>[ds].[yr:Week:ok]</cols>
+          <rows>[ds].[:Measure Names]</rows>
+          <panes><pane><mark class="Automatic"/><encodings>
+            <text column="[ds].[Multiple Values]"/>
+          </encodings></pane></panes>
+        </table></worksheet>''')
+        self.assertEqual(self.ext.determine_chart_type(ws), 'tableEx')
+
+    def test_text_quick_table_calc_with_row_and_column_is_a_table(self):
+        ws = ET.fromstring('''<worksheet><table>
+          <cols>[ds].[Week]</cols><rows>[ds].[Delivery Category]</rows>
+          <panes><pane><mark class="Automatic"/><encodings>
+            <text column="[ds].[pcto:usr:Share:qk:2]"/>
+          </encodings></pane></panes>
+        </table></worksheet>''')
+        self.assertEqual(self.ext.determine_chart_type(ws), 'tableEx')
+
+    def test_bar_pane_with_color_is_stacked_bar_and_all_pane_marks_are_kept(self):
+        ws = ET.fromstring('''<worksheet><table><cols/><rows/>
+          <panes>
+            <pane><mark class="Automatic"/></pane>
+            <pane><mark class="Bar"/><encodings>
+              <color column="[ds].[none:Is UZB:nk]"/>
+            </encodings></pane>
+          </panes></table></worksheet>''')
+        self.assertEqual(self.ext.determine_chart_type(ws), 'stackedBarChart')
+        self.assertEqual(self.ext._extract_mark_class(ws), 'Bar')
+        self.assertEqual(self.ext.extract_mark_classes(ws), ['Automatic', 'Bar'])
+
+    def test_measure_values_text_crosstab_is_a_table(self):
+        ws = ET.fromstring('''<worksheet><table>
+          <cols>[ds].[Week]</cols>
+          <rows>[ds].[Delivery Category]</rows>
+          <panes><pane><mark class="Automatic"/><encodings>
+            <text column="[ds].[Multiple Values]"/>
+          </encodings></pane></panes>
+        </table></worksheet>''')
+        self.assertEqual(self.ext.determine_chart_type(ws), 'tableEx')
 
     def test_marks_tooltip_quick_calc_retains_aggregation_without_instance_suffix(self):
         ws = ET.fromstring('''<worksheet><table><panes><pane><encodings>
@@ -1829,6 +1912,30 @@ class TestExtractPublishedDatasources(unittest.TestCase):
         pub = self.ext.workbook_data['published_datasources']
         self.assertEqual(len(pub), 1)
         self.assertEqual(pub[0]['name'], 'Shared Sales')
+
+    def test_duplicate_sqlproxy_nodes_keep_repository_identity_after_dedup(self):
+        root = ET.fromstring('''
+        <workbook><datasources>
+          <datasource name="sqlproxy.embedded" caption="Shared Inventory">
+            <connection class="sqlproxy" dbname="Shared Inventory"/>
+            <repository-location site="enpal" path="/t/enpal/datasources"
+                                 id="Shared_Inventory"/>
+            <column name="[Field]" caption="Field"><calculation formula="[X]"/></column>
+          </datasource>
+          <datasource name="sqlproxy.embedded" caption="Shared Inventory">
+            <column name="[Calculation_1]" caption="Calculated Field">
+              <calculation formula="SUM([Field])"/>
+            </column>
+          </datasource>
+        </datasources></workbook>''')
+        self.ext.extract_datasources(root)
+        ds = next(x for x in self.ext.workbook_data['datasources']
+                  if x['name'] == 'sqlproxy.embedded')
+        self.assertEqual(ds['published_datasource_id'], 'Shared_Inventory')
+        self.assertEqual(ds['published_datasource_name'], 'Shared Inventory')
+        self.ext.extract_published_datasources(root)
+        self.assertEqual(self.ext.workbook_data['published_datasources'][0]
+                         ['workbook_datasource_id'], 'sqlproxy.embedded')
 
     def test_sqlproxy_connection(self):
         root = ET.fromstring('''

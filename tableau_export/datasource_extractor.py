@@ -12,6 +12,8 @@ import os
 import csv
 import re
 import logging
+import tempfile
+import shutil
 from dax_converter import _reverse_tableau_bracket_escape
 try:
     from .safe_xml import safe_findall, safe_findtext, safe_get_attr
@@ -513,10 +515,14 @@ def resolve_published_datasource(datasource, server_client=None):
         The datasource dict (mutated in place, or unchanged if not sqlproxy).
     """
     conn = datasource.get('connection', {})
-    if conn.get('type') != 'Tableau Server':
+    is_sqlproxy = conn.get('type') == 'Tableau Server'
+    if not is_sqlproxy and not datasource.get('published_datasource_id'):
         return datasource
 
-    ds_name = conn.get('details', {}).get('server_ds_name', '')
+    ds_name = (conn.get('details', {}).get('server_ds_name', '')
+               or datasource.get('published_datasource_name', '')
+               or datasource.get('published_datasource_id', ''))
+    ds_luid = datasource.get('published_datasource_luid', '')
     if not ds_name or server_client is None:
         # Mark as unresolved — caller can warn or skip
         datasource['_published_unresolved'] = True
@@ -527,7 +533,10 @@ def resolve_published_datasource(datasource, server_client=None):
         remote_datasources = server_client.list_datasources()
         match = None
         for rds in remote_datasources:
-            if rds.get('name', '') == ds_name:
+            if ((ds_luid and rds.get('id') == ds_luid)
+                    or rds.get('name', '') == ds_name
+                    or rds.get('contentUrl', '') == ds_name
+                    or rds.get('contentUrl', '') == datasource.get('published_datasource_id')):
                 match = rds
                 break
         # Accent-insensitive fallback
@@ -538,7 +547,9 @@ def resolve_published_datasource(datasource, server_client=None):
                                if not _ud.combining(c)).lower()
             norm_ds = _norm(ds_name)
             for rds in remote_datasources:
-                if _norm(rds.get('name', '')) == norm_ds:
+                if (_norm(rds.get('name', '')) == norm_ds
+                        or _norm(rds.get('contentUrl', '')) == norm_ds
+                        or _norm(rds.get('contentUrl', '')) == _norm(datasource.get('published_datasource_id', ''))):
                     match = rds
                     break
 
@@ -550,9 +561,10 @@ def resolve_published_datasource(datasource, server_client=None):
         # Download and extract the remote datasource
         ds_id = match.get('id', '')
         if ds_id and hasattr(server_client, 'download_datasource'):
-            import tempfile
-            tmp_path = server_client.download_datasource(ds_id)
-            if tmp_path and os.path.exists(tmp_path):
+            temp_dir = tempfile.mkdtemp(prefix='ttpbi_published_ds_')
+            tmp_path = os.path.join(temp_dir, 'published.tdsx')
+            server_client.download_datasource(ds_id, tmp_path)
+            if os.path.exists(tmp_path):
                 try:
                     remote_ds = _parse_published_datasource_file(tmp_path)
                     if remote_ds:
@@ -567,12 +579,21 @@ def resolve_published_datasource(datasource, server_client=None):
                             datasource['relationships'] = remote_ds['relationships']
                         if remote_ds.get('connection_map'):
                             datasource['connection_map'] = remote_ds['connection_map']
+                        # The workbook datasource is named for the published
+                        # object, while the published TDS uses its actual SQL
+                        # relation name. Use that relation as the model table
+                        # (and preserve it as source_table for Snowflake M).
+                        for target_table in datasource.get('tables', []):
+                            remote_table = next((item for item in remote_ds.get('tables', [])
+                                                 if item.get('source_table')), None)
+                            if remote_table:
+                                target_table['name'] = remote_table['name']
+                                target_table['source_table'] = remote_table['source_table']
+                                target_table['columns'] = remote_table.get('columns', [])
+                                target_table['connection_details'] = remote_table.get('connection_details', {})
                         datasource['_published_resolved'] = True
                 finally:
-                    try:
-                        os.remove(tmp_path)
-                    except OSError:
-                        pass
+                    shutil.rmtree(temp_dir, ignore_errors=True)
     except Exception as e:
         logger.warning('Failed to resolve published datasource %r: %s', ds_name, e)
         datasource['_published_unresolved'] = True
@@ -726,10 +747,13 @@ def resolve_published_datasource_cached(datasource, server_client=None,
         The datasource dict (mutated in place).
     """
     conn = datasource.get('connection', {})
-    if conn.get('type') != 'Tableau Server':
+    is_sqlproxy = conn.get('type') == 'Tableau Server'
+    if not is_sqlproxy and not datasource.get('published_datasource_id'):
         return datasource
 
-    ds_name = conn.get('details', {}).get('server_ds_name', '')
+    ds_name = (conn.get('details', {}).get('server_ds_name', '')
+               or datasource.get('published_datasource_name', '')
+               or datasource.get('published_datasource_id', ''))
     if not ds_name:
         datasource['_published_unresolved'] = True
         return datasource
@@ -789,10 +813,14 @@ def resolve_all_published(datasources, server_client=None,
 
     for ds in datasources:
         conn = ds.get('connection', {})
-        if conn.get('type') != 'Tableau Server':
+        if (conn.get('type') != 'Tableau Server'
+                and not ds.get('published_datasource_id')):
             continue
 
-        ds_name = conn.get('details', {}).get('server_ds_name', ds.get('name', ''))
+        ds_name = (conn.get('details', {}).get('server_ds_name', '')
+                   or ds.get('published_datasource_name', '')
+                   or ds.get('published_datasource_id', '')
+                   or ds.get('name', ''))
         resolve_published_datasource_cached(
             ds, server_client=server_client,
             cache_dir=cache_dir, no_cache=no_cache)
@@ -1017,8 +1045,8 @@ def _build_connection_map(datasource_elem, twbx_path=None):
     """
     conn_map = {}
     
-    connection_elem = datasource_elem.find('.//connection[@class="federated"]')
-    if connection_elem is None:
+    connection_elem = datasource_elem.find('./connection')
+    if connection_elem is None or connection_elem.get('class') != 'federated':
         connection_elem = datasource_elem.find('.//connection')
     if connection_elem is None:
         return conn_map
@@ -1029,13 +1057,27 @@ def _build_connection_map(datasource_elem, twbx_path=None):
         if inner_conn is None or not nc_name:
             continue
         conn_map[nc_name] = _parse_connection_class(inner_conn, named_conn, twbx_path)
+
+    # Federated workbooks can embed another connector (commonly Hyper) as a
+    # nested connection. Map its relations without replacing the primary source.
+    for inner_conn in connection_elem.findall('.//connection'):
+        conn_class = inner_conn.get('class', '')
+        if not conn_class or conn_class == 'federated':
+            continue
+        details = _parse_connection_class(inner_conn, twbx_path=twbx_path)
+        for relation in inner_conn.findall('.//relation'):
+            relation_ref = relation.get('connection', '')
+            if relation_ref and relation_ref not in conn_map:
+                conn_map[relation_ref] = details
     
     return conn_map
 
 
 def extract_connection_details(datasource_elem):
     """Extracts connection details (Excel, SQL, etc.)"""
-    connection_elem = datasource_elem.find('.//connection[@class="federated"]')
+    connection_elem = datasource_elem.find('./connection')
+    if connection_elem is None or connection_elem.get('class') != 'federated':
+        connection_elem = datasource_elem.find('.//connection[@class="federated"]')
     if connection_elem is None:
         connection_elem = datasource_elem.find('.//connection')
     if connection_elem is None:
@@ -1070,14 +1112,32 @@ def extract_tables_with_columns(datasource_elem, connection_map=None):
     """
     if connection_map is None:
         connection_map = {}
-    
+
+    relation_connections = {}
+    for connection in datasource_elem.findall('.//connection'):
+        conn_class = connection.get('class', '')
+        if not conn_class or conn_class == 'federated':
+            continue
+        details = _parse_connection_class(connection)
+        for relation in connection.findall('.//relation'):
+            if not relation.get('connection'):
+                relation_connections[id(relation)] = details
+
     # Phase 1: Collect all physical tables
     raw_tables = {}  # name -> best table dict
-    
+
+    nested_sql_relations = {
+        id(sql_relation)
+        for table_relation in datasource_elem.findall('.//relation[@type="table"]')
+        for sql_relation in table_relation.findall('.//relation[@type="text"]')
+    }
     for relation in datasource_elem.findall('.//relation'):
-        # ONLY physical tables, NOT joins
+        # Physical table relations and custom-SQL relations have refreshable
+        # sources. Join nodes are Tableau metadata, not source objects.
         table_type = relation.get('type', '')
-        if table_type != 'table':
+        if table_type not in ('table', 'text'):
+            continue
+        if table_type == 'text' and id(relation) in nested_sql_relations:
             continue
         
         table_name = relation.get('name', '')
@@ -1085,6 +1145,9 @@ def extract_tables_with_columns(datasource_elem, connection_map=None):
             continue
         
         conn_ref = relation.get('connection', '')
+        sql_relation = (relation if table_type == 'text'
+                        else relation.find('.//relation[@type="text"]'))
+        custom_sql = (sql_relation.text or '').strip() if sql_relation is not None else ''
         
         columns = []
         for col_elem in relation.findall('./columns/column'):
@@ -1104,7 +1167,8 @@ def extract_tables_with_columns(datasource_elem, connection_map=None):
         # Deduplicate: keep the version with the most columns
         if table_name not in raw_tables or len(columns) > len(raw_tables[table_name].get('columns', [])):
             # Resolve connection details for this table
-            table_connection = connection_map.get(conn_ref, {})
+            table_connection = (connection_map.get(conn_ref)
+                                or relation_connections.get(id(relation), {}))
             
             raw_tables[table_name] = {
                 'name': table_name,
@@ -1113,7 +1177,8 @@ def extract_tables_with_columns(datasource_elem, connection_map=None):
                 'connection': conn_ref,
                 'connection_details': table_connection,
                 'caption': relation.get('caption', ''),
-                'source_table': relation.get('table', '').strip('[]'),
+                'source_table': relation.get('table', '').replace('].[', '.').strip('[]'),
+                'custom_sql': custom_sql,
             }
     
     # Phase 2: For tables with no nested columns (SQL Server, etc.),
@@ -1310,6 +1375,16 @@ def extract_tables_with_columns(datasource_elem, connection_map=None):
     # Filter out 0-column tables when other tables have columns
     # (e.g. Tableau extract artifacts like 'Extract' tables in .twbx files)
     tables = list(raw_tables.values())
+    live_column_sets = {
+        frozenset(col.get('name', '') for col in t.get('columns', []))
+        for t in tables
+        if t.get('source_table', '').casefold() != 'extract.extract'
+    }
+    tables = [t for t in tables if not (
+        t.get('source_table', '').casefold() == 'extract.extract'
+        and frozenset(col.get('name', '') for col in t.get('columns', []))
+        in live_column_sets
+    )]
     has_populated = any(t['columns'] for t in tables)
     if has_populated:
         tables = [t for t in tables if t['columns']]

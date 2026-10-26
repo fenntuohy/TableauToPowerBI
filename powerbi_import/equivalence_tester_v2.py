@@ -335,6 +335,16 @@ def _read_generated_model(pbi_artifact: Dict) -> Optional[Dict]:
     return {'tables': tables, 'columns': columns, 'measures': measures}
 
 
+def _normalize_symbol_name(name: Any) -> str:
+    """Normalize Tableau's bracket notation against sanitized Power BI names."""
+    value = str(name or '').strip()
+    if value.startswith('[') and value.endswith(']'):
+        value = value[1:-1]
+    value = value.replace(']]', ']')
+    value = value.replace('[', '').replace(']', '')
+    return re.sub(r'\s+', ' ', value).strip().casefold()
+
+
 def run_full_equivalence_suite(tableau_export: Dict, pbi_artifact: Dict,
                                verbose: bool = False) -> Dict:
     """Run comprehensive equivalence test suite.
@@ -357,6 +367,9 @@ def run_full_equivalence_suite(tableau_export: Dict, pbi_artifact: Dict,
     results = []
     model = _read_generated_model(pbi_artifact)
     model_names = (model['measures'] | model['columns']) if model else set()
+    normalized_model_names = {
+        _normalize_symbol_name(name) for name in model_names
+    }
 
     # Test 1: Row counts need a live query against the deployed model.
     for ds in tableau_export.get('datasources', []):
@@ -373,7 +386,9 @@ def run_full_equivalence_suite(tableau_export: Dict, pbi_artifact: Dict,
     # Test 2: every Tableau calculation should exist in the model
     for calc in tableau_export.get('calculations', []):
         calc_name = calc.get('caption') or calc.get('name', 'Unknown')
-        clean = str(calc_name).strip('[]')
+        raw_name = str(calc_name).strip()
+        clean = (raw_name[1:-1] if raw_name.startswith('[') and raw_name.endswith(']')
+                 else raw_name)
         if model is None:
             results.append({
                 'test': f'calc:{clean}',
@@ -383,7 +398,7 @@ def run_full_equivalence_suite(tableau_export: Dict, pbi_artifact: Dict,
                 'message': f'{clean}: no generated model to compare against',
             })
             continue
-        present = clean in model_names
+        present = clean in model_names or _normalize_symbol_name(calc_name) in normalized_model_names
         results.append({
             'test': f'calc:{clean}',
             'passed': present,

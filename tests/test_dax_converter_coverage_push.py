@@ -1155,7 +1155,7 @@ class TestResolveColumnsInternals(unittest.TestCase):
         # Should resolve via bracket escape reversal
         self.assertIn('T', result)
 
-    def test_param_value_inlined_for_measure_in_calc_column(self):
+    def test_parameter_measure_reference_is_not_inlined_in_calc_column(self):
         result = convert_tableau_formula_to_dax(
             '[Param1]',
             table_name='T',
@@ -1163,7 +1163,8 @@ class TestResolveColumnsInternals(unittest.TestCase):
             is_calc_column=True,
             param_values={'Param1': '42'}
         )
-        self.assertIn('42', result)
+        self.assertIn('[Param1]', result)
+        self.assertNotIn('42', result)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

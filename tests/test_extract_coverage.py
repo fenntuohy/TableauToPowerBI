@@ -505,6 +505,48 @@ class TestInferAutoChartType(unittest.TestCase):
         mv_names = {f['name'] for f in fields if f['shelf'] == 'measure_value'}
         self.assertEqual(mv_names, {'Revenue', 'Cost'})
 
+    def test_measure_names_filter_limits_expansion_to_visible_measure_instances(self):
+        xml = '''<worksheet name="S"><table>
+          <cols>[DS].[Week]</cols><rows>[DS].[:Measure Names]</rows>
+          <panes><pane><mark class="Automatic"/><encodings>
+            <text column="[DS].[Multiple Values]"/>
+          </encodings></pane></panes>
+          </table>
+          <filters><filter class="categorical" column="[DS].[:Measure Names]">
+            <groupfilter function="union">
+              <groupfilter function="member" member="&quot;[DS].[usr:Revenue:qk]&quot;"/>
+            </groupfilter>
+          </filter></filters>
+          <datasource-dependencies datasource="DS">
+            <column name="[Revenue]" role="measure"/>
+            <column name="[Hidden Measure]" role="measure"/>
+            <column-instance column="[Revenue]" derivation="User" name="[usr:Revenue:qk]"/>
+            <column-instance column="[Hidden Measure]" derivation="User" name="[usr:Hidden Measure:qk]"/>
+          </datasource-dependencies>
+        </worksheet>'''
+        ext, _ = _make_extractor()
+        fields = ext.extract_worksheet_fields(ET.fromstring(xml))
+        measure_values = [f['name'] for f in fields if f['shelf'] == 'measure_value']
+        self.assertEqual(measure_values, ['Revenue'])
+
+    def test_measure_names_filter_decodes_escaped_bracket_member_names(self):
+        xml = '''<worksheet name="S"><table>
+          <cols>[DS].[Week]</cols><rows>[DS].[:Measure Names]</rows>
+          <filter class="categorical" column="[DS].[:Measure Names]">
+            <groupfilter function="union">
+              <groupfilter function="member" member="&quot;[DS].[usr:PDD [\\#]] (copy)_123:vtavg:qk]&quot;"/>
+            </groupfilter>
+          </filter></table>
+          <datasource-dependencies datasource="DS">
+            <column name="[PDD [#]] (copy)_123" role="measure"/>
+            <column-instance column="[PDD [#]] (copy)_123" derivation="User" name="[usr:PDD [#]] (copy)_123:vtavg:qk]"/>
+          </datasource-dependencies>
+        </worksheet>'''
+        ext, _ = _make_extractor()
+        fields = ext.extract_worksheet_fields(ET.fromstring(xml))
+        measure_values = [f['name'] for f in fields if f['shelf'] == 'measure_value']
+        self.assertEqual(measure_values, ['PDD [#] (copy)_123'])
+
     def test_measure_names_user_derivation_included(self):
         """User-derived column-instances (calculations) included."""
         xml = '''<worksheet name="S">

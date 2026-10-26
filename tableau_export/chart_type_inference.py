@@ -23,14 +23,56 @@ def _extract_mark_class(worksheet):
     Used downstream by the PBIR generator to look up custom visual
     GUIDs for mark types that have AppSource equivalents.
     """
-    for pane in worksheet.findall('.//pane'):
-        mark = pane.find('.//mark')
-        if mark is not None and mark.get('class'):
-            return mark.get('class')
+    marks = [mark.get('class') for mark in worksheet.findall('.//pane/mark')
+             if mark.get('class')]
+    if marks:
+        return next((mark for mark in reversed(marks)
+                     if mark.lower() != 'automatic'), marks[0])
     for mark in worksheet.findall('.//style/mark'):
         if mark.get('class'):
             return mark.get('class')
     return None
+
+
+def extract_mark_classes(worksheet):
+    """Return distinct marks used by the worksheet's Tableau panes."""
+    marks = []
+    for mark in worksheet.findall('.//pane/mark') + worksheet.findall('.//style/mark'):
+        value = mark.get('class')
+        if value and value not in marks:
+            marks.append(value)
+    return marks
+
+
+def _has_multiple_values_table_signature(worksheet):
+    """Tableau crosstabs use the virtual Measure Names/Multiple Values pair."""
+    rows = worksheet.findtext('./table/rows', '') or ''
+    text_columns = [elem.get('column', '') for elem in worksheet.findall('.//encodings/text')]
+    return (':Measure Names' in rows and any('Multiple Values' in col for col in text_columns))
+
+
+def _has_text_quick_calc_table_signature(worksheet):
+    """An Automatic sheet with axis dimensions and a text table calc is a crosstab."""
+    cols = worksheet.findtext('./table/cols', '') or ''
+    rows = worksheet.findtext('./table/rows', '') or ''
+    if not cols.strip() or not rows.strip():
+        return False
+    return any(
+        re.search(r'\]\.(?:\[)?pcto:', elem.get('column', ''), re.IGNORECASE)
+        for elem in worksheet.findall('.//encodings/text')
+    )
+
+
+def _has_stacked_bar_pane(worksheet):
+    """A Bar pane with a color dimension is Tableau's stacked-bar encoding."""
+    for pane in worksheet.findall('.//pane'):
+        mark = pane.find('./mark')
+        if mark is None or (mark.get('class') or '').lower() != 'bar':
+            continue
+        encodings = pane.find('./encodings')
+        if encodings is not None and encodings.find('./color') is not None:
+            return True
+    return False
 
 def determine_chart_type(worksheet):
     """Determines the chart type from the Tableau mark type.
@@ -77,6 +119,13 @@ def determine_chart_type(worksheet):
             return 'map'
         return 'clusteredBarChart'
 
+    if (_has_multiple_values_table_signature(worksheet)
+            or _has_text_quick_calc_table_signature(worksheet)):
+        return 'tableEx'
+
+    if _has_stacked_bar_pane(worksheet):
+        return 'stackedBarChart'
+
     card_type = _shelfless_marks_card_type(worksheet, mark_class)
     if card_type:
         return card_type
@@ -87,6 +136,13 @@ def determine_chart_type(worksheet):
             and 'Longitude (generated)' in (cols.text or '')
             and 'Latitude (generated)' in (rows.text or '')):
         return 'map'
+
+    # A Tableau worksheet can have several panes with different marks. A Bar
+    # pane split by a categorical color encoding is a stacked bar, even when
+    # the first pane is Automatic.
+    mark_classes = extract_mark_classes(worksheet)
+    if ('Bar' in mark_classes and worksheet.find('.//encodings/color') is not None):
+        return 'stackedBarChart'
 
     # For explicit mark types, use the mapping directly
     if mark_class.lower() != 'automatic':
@@ -184,6 +240,20 @@ def _infer_automatic_chart_type(worksheet):
     Uses field shelf assignments (columns/rows) and field names to
     determine the most appropriate Power BI visual type.
     """
+    # Generated calculation IDs carry no date words; use the actual shelf metadata.
+    for dependencies in worksheet.findall('.//datasource-dependencies'):
+        datasource = dependencies.get('datasource', '')
+        dates = {c.get('name') for c in dependencies.findall('./column')
+                 if c.get('datatype', '').lower() in ('date', 'datetime')}
+        for instance in dependencies.findall('./column-instance'):
+            if instance.get('column') not in dates or instance.get('type') != 'quantitative':
+                continue
+            reference = f"[{datasource}].{instance.get('name', '')}"
+            for axis, other in (('cols', 'rows'), ('rows', 'cols')):
+                if (reference in (worksheet.findtext(f'./table/{axis}') or '')
+                        and (worksheet.findtext(f'./table/{other}') or '').strip()):
+                    return 'lineChart'
+
     date_words = {'date', 'time', 'year', 'month', 'day', 'week', 'quarter',
                   'datetime', 'timestamp', 'period', 'yr', 'mois',
                   # French

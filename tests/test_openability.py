@@ -411,6 +411,41 @@ class TestOpenability(unittest.TestCase):
             r = check_openability(d)
             self.assertTrue(r.openable, r.blocking_issues)
 
+    def test_field_parameter_nameof_is_not_validated_as_a_normal_dax_ref(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_project(d, _tmdl_with_m(["let x=1 in x"]))
+            tables_dir = os.path.join(d, "P.SemanticModel", "definition", "tables")
+            with open(os.path.join(tables_dir, "DateParts FieldParam.tmdl"), "w", encoding="utf-8") as fh:
+                fh.write("table DateParts\n"
+                         "\tcolumn Fields\n\t\tdataType: string\n"
+                         "\tpartition DateParts = calculated\n"
+                         "\t\tmode: import\n"
+                         "\t\tsource = { (NAMEOF('Calendar'[Year]), 0, \"Year\") }\n"
+                         "\tannotation ParameterMetadata = {\"version\":3,\"kind\":2}\n")
+            calendar = os.path.join(tables_dir, "Calendar.tmdl")
+            with open(calendar, "w", encoding="utf-8") as fh:
+                fh.write("table Calendar\n\tcolumn Year\n\t\tdataType: int64\n")
+            r = check_openability(d)
+            semantic = next(c for c in r.checks if c.name == "semantic_validation")
+            self.assertTrue(semantic.ok, semantic.issues)
+
+    def test_field_parameter_nameof_missing_field_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write_project(d, _tmdl_with_m(["let x=1 in x"]))
+            tables_dir = os.path.join(d, "P.SemanticModel", "definition", "tables")
+            with open(os.path.join(tables_dir, "DateParts.tmdl"), "w", encoding="utf-8") as fh:
+                fh.write("table DateParts\n"
+                         "\tcolumn Fields\n\t\tdataType: string\n"
+                         "\tpartition DateParts = calculated\n"
+                         "\t\tmode: import\n"
+                         "\t\tsource = { (NAMEOF('Calendar'[Year]), 0, \"Year\") }\n"
+                         "\tannotation ParameterMetadata = {\"version\":3,\"kind\":2}\n")
+            semantic = next(c for c in check_openability(d).checks
+                            if c.name == "semantic_validation")
+            self.assertFalse(semantic.ok)
+            self.assertTrue(any('Unknown column/measure [Year]' in issue
+                                for issue in semantic.issues))
+
     def test_no_tmdl_blocks(self):
         with tempfile.TemporaryDirectory() as d:
             # report present but semantic model has no .tmdl

@@ -88,6 +88,17 @@ class TestFilterModeClassification(unittest.TestCase):
         self.assertEqual(filters[0]['period_type'], 'last')
         self.assertEqual(filters[0]['period_count'], 3)
 
+    def test_modern_calendar_week_window_is_preserved(self):
+        filters = self._extract('<date-options start-of-week="monday"/>'
+            '<worksheet name="Warehouses"><filter class="relative-date" '
+            'column="[ds].[none:RECEIVE_DATE:qk]" period-type-v2="week" '
+            'first-period="-11" last-period="0" include-future="true" include-null="false"/></worksheet>')
+        f = filters[0]
+        self.assertEqual((f['filter_mode'], f['period'], f['period_count']), ('relative-date', 'week', 12))
+        self.assertEqual((f['first_period'], f['last_period'], f['week_start']), (-11, 0, 'monday'))
+        self.assertTrue(f['include_future'])
+        self.assertFalse(f['include_null'])
+
     def test_wildcard(self):
         filters = self._extract(
             '<filter column="[Name]" match="sales" match-type="contains" />')
@@ -185,7 +196,7 @@ class TestSlicerModeDetection(unittest.TestCase):
 
     def test_filter_mode_relative_date(self):
         obj = {'filter_mode': 'relative-date'}
-        self.assertEqual(self._detect(obj=obj), 'Basic')
+        self.assertEqual(self._detect(obj=obj), 'Relative')
 
     def test_filter_mode_wildcard(self):
         obj = {'filter_mode': 'wildcard'}
@@ -391,3 +402,51 @@ class TestVisualFilterCreation(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class TestRelativeSlicerHandoff(unittest.TestCase):
+    def test_worksheet_default_reaches_native_slicer(self):
+        import tempfile
+        from pathlib import Path
+        gen = _make_generator()
+        gen._field_map = {'Receive Date': ('Sales', 'Receive Date')}
+        obj = {'name': 'Warehouses', 'param': '[ds].[none:RECEIVE_DATE:qk]',
+               'calc_column_id': 'RECEIVE_DATE', 'position': {'x': 0, 'y': 0, 'w': 200, 'h': 50}}
+        converted = {'filters': [{'worksheet': 'Warehouses', 'field': obj['param'],
+                     'filter_mode': 'relative-date', 'period': 'week', 'period_count': 12,
+                     'period_type': 'last', 'first_period': -11, 'last_period': 0}]}
+        with tempfile.TemporaryDirectory() as directory:
+            gen._create_visual_filter_control(directory, obj, 1, 1, 0,
+                                               {'RECEIVE_DATE': 'Receive Date'}, converted)
+            visual = json.loads(next(Path(directory).glob('*/visual.json')).read_text())['visual']
+        props = visual['objects']['data'][0]['properties']
+        self.assertEqual(props['mode']['expr']['Literal']['Value'], "'Relative'")
+        self.assertEqual(props['relativeDuration']['expr']['Literal']['Value'], '12W')
+        self.assertEqual(props['relativePeriod']['expr']['Literal']['Value'], "'Calendar Weeks'")
+        condition = visual['objects']['general'][0]['properties']['filter']['filter']['Where'][0]['Condition']['RelativeDate']
+        self.assertEqual(condition['TimeUnit'], 1)
+        self.assertEqual(condition['TimeUnitCount'], 12)
+        self.assertEqual(condition['RelativeDateFilterType'], 0)
+        self.assertTrue(condition['IncludeToday'])
+        self.assertIn('title', visual['visualContainerObjects'])
+
+    def test_relative_slicer_keeps_calendar_week_period_and_filter_count(self):
+        import tempfile
+        from pathlib import Path
+
+        gen = _make_generator()
+        gen._field_map = {'Receive Date': ('Sales', 'Receive Date')}
+        obj = {'name': 'Warehouses', 'param': '[ds].[none:RECEIVE_DATE:qk]',
+               'calc_column_id': 'RECEIVE_DATE', 'position': {'x': 0, 'y': 0, 'w': 200, 'h': 50}}
+        converted = {'filters': [{'worksheet': 'Warehouses', 'field': obj['param'],
+                     'filter_mode': 'relative-date', 'period': 'week', 'period_count': 5,
+                     'period_type': 'last'}]}
+        with tempfile.TemporaryDirectory() as directory:
+            gen._create_visual_filter_control(directory, obj, 1, 1, 0,
+                                               {'RECEIVE_DATE': 'Receive Date'}, converted)
+            visual = json.loads(next(Path(directory).glob('*/visual.json')).read_text())['visual']
+
+        props = visual['objects']['data'][0]['properties']
+        condition = visual['objects']['general'][0]['properties']['filter']['filter']['Where'][0]['Condition']['RelativeDate']
+        self.assertEqual(props['relativeDuration']['expr']['Literal']['Value'], '5W')
+        self.assertEqual(props['relativePeriod']['expr']['Literal']['Value'], "'Calendar Weeks'")
+        self.assertEqual(condition['TimeUnitCount'], 5)

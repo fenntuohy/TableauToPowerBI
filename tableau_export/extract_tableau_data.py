@@ -94,6 +94,7 @@ from extract_primitives import _MARK_ENCODINGS  # noqa: E402,F401
 from chart_type_inference import (  # noqa: E402,F401
     _CARD_MARK_CLASSES,
     _extract_mark_class,
+    extract_mark_classes,
     determine_chart_type,
     _shelfless_marks_card_type,
     _detect_bar_orientation,
@@ -405,6 +406,7 @@ class TableauExtractor:
                 'title_format': self._extract_title_format(worksheet),
                 'chart_type': self.determine_chart_type(worksheet),
                 'original_mark_class': self._extract_mark_class(worksheet),
+                'mark_classes': extract_mark_classes(worksheet),
                 'fields': self.extract_worksheet_fields(worksheet),
                 'filters': self.extract_worksheet_filters(worksheet),
                 'formatting': self.extract_formatting(worksheet),
@@ -485,14 +487,69 @@ class TableauExtractor:
         
         # Deduplicate: keep the richest DS by name
         best_ds = {}  # ds_name -> ds_data
+        xml_datasources = {}
+        for datasource in self._findall_root_cached(root, './/datasource'):
+            xml_datasources.setdefault(datasource.get('name', ''), []).append(datasource)
         for ds in raw_datasources:
             ds_name = ds.get('name', '')
+            # A repository-location points from the workbook's embedded
+            # sqlproxy datasource to its published datasource. Retain the
+            # LUID and published name in the normalized record; this is the
+            # join key needed to download the authoritative TDS definition.
+            xml_ds = None
+            repo = None
+            for candidate in xml_datasources.get(ds_name, []):
+                candidate_repo = next((e for e in candidate.iter()
+                                       if e.tag.rsplit('}', 1)[-1] == 'repository-location'), None)
+                if candidate_repo is not None:
+                    xml_ds, repo = candidate, candidate_repo
+                    break
+            if repo is not None:
+                ds['published_datasource_id'] = repo.get('id', '')
+                ds['published_datasource_name'] = (
+                    repo.get('id', '') or ds.get('caption', '') or ds_name
+                )
+                datasource_conn = next((e for e in xml_ds.iter()
+                                        if e.tag.rsplit('}', 1)[-1] == 'connection'
+                                        and e.get('class') == 'sqlproxy'), None)
+                if datasource_conn is not None:
+                    ds['published_datasource_name'] = (
+                        datasource_conn.get('server-ds-friendly-name')
+                        or datasource_conn.get('dbname')
+                        or ds['published_datasource_name']
+                    )
             tables = ds.get('tables', [])
             calcs = ds.get('calculations', [])
             richness = len(tables) + len(calcs)
             
             if ds_name not in best_ds or richness > (len(best_ds[ds_name].get('tables', [])) + len(best_ds[ds_name].get('calculations', []))):
                 best_ds[ds_name] = ds
+
+        # Tableau repeats datasource nodes throughout a workbook. A later,
+        # richer sqlproxy node can win deduplication while the repository
+        # location exists only on the first node. Merge published identity
+        # independently of which duplicate wins the content comparison.
+        for ds_name, candidates in xml_datasources.items():
+            target = best_ds.get(ds_name)
+            if target is None:
+                continue
+            for candidate in candidates:
+                repo = next((e for e in candidate.iter()
+                             if e.tag.rsplit('}', 1)[-1] == 'repository-location'), None)
+                if repo is None:
+                    continue
+                target['published_datasource_id'] = repo.get('id', '')
+                target['published_datasource_name'] = repo.get('id', '') or target.get('caption', '') or ds_name
+                conn = next((e for e in candidate.iter()
+                            if e.tag.rsplit('}', 1)[-1] == 'connection'
+                            and e.get('class') == 'sqlproxy'), None)
+                if conn is not None:
+                    target['published_datasource_name'] = (
+                        conn.get('server-ds-friendly-name')
+                        or conn.get('dbname')
+                        or target['published_datasource_name']
+                    )
+                break
         
         # Filter: keep only DSs with real content
         datasources = []
@@ -829,6 +886,23 @@ class TableauExtractor:
                 if anchor:
                     filter_data['anchor_date'] = anchor
 
+            # Current TWB files encode calendar offsets rather than count/period.
+            if filt.get('class') == 'relative-date' and filt.get('period-type-v2'):
+                first = int(filt.get('first-period', '0'))
+                last = int(filt.get('last-period', '0'))
+                filter_mode = 'relative-date'
+                filter_data.update({
+                    'period': filt.get('period-type-v2'),
+                    'period_type': 'last' if first < 0 else 'next' if last > 0 else 'this',
+                    'period_count': last - first + 1,
+                    'first_period': first,
+                    'last_period': last,
+                    'include_future': filt.get('include-future', 'false') == 'true',
+                    'include_null': filt.get('include-null', 'false') == 'true',
+                    'week_start': next((e.get('start-of-week') for e in root.findall('.//date-options')
+                                        if e.get('start-of-week')), 'sunday'),
+                })
+
             # Wildcard detection: match/pattern attributes
             match = filt.get('match', filt.findtext('.//match', ''))
             pattern = filt.get('pattern', filt.findtext('.//pattern', ''))
@@ -885,6 +959,9 @@ class TableauExtractor:
     # so extractor.determine_chart_type(worksheet) keeps working.
     def _extract_mark_class(self, worksheet):
         return _extract_mark_class(worksheet)
+
+    def extract_mark_classes(self, worksheet):
+        return extract_mark_classes(worksheet)
 
     def determine_chart_type(self, worksheet):
         return determine_chart_type(worksheet)
@@ -2379,7 +2456,8 @@ class TableauExtractor:
         pub_ds = []
         for ds in self._findall_root_cached(root, './/datasource'):
             # Published datasources have a repository-location attribute
-            repo = ds.find('.//repository-location')
+            repo = next((e for e in ds.iter()
+                         if e.tag.rsplit('}', 1)[-1] == 'repository-location'), None)
             if repo is not None:
                 pub_ds.append({
                     'name': ds.get('caption', ds.get('name', '')),
@@ -2387,6 +2465,7 @@ class TableauExtractor:
                     'path': repo.get('path', ''),
                     'id': repo.get('id', ''),
                     'derived_from': repo.get('derived-from', ''),
+                    'workbook_datasource_id': ds.get('name', ''),
                 })
             # Also check for <connection class="sqlproxy"> (published DS indicator)
             for conn in ds.findall('.//connection[@class="sqlproxy"]'):

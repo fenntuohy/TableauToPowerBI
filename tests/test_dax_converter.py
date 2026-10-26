@@ -193,6 +193,17 @@ class TestSimpleFunctionConversions(unittest.TestCase):
         result = convert_tableau_formula_to_dax("MAX([Value])")
         self.assertIn("MAX", result)
 
+    def test_scalar_min_max_clamps_remain_scalar_functions(self):
+        result = convert_tableau_formula_to_dax(
+            "MIN(1, MAX(0, ([Score] - 0.85) / (0.95 - 0.85)))",
+            table_name='T',
+            column_table_map={'Score': 'T'},
+            measure_names={'Score'},
+        )
+        self.assertIn('MIN(1, MAX(0,', result)
+        self.assertNotIn('MINX', result)
+        self.assertNotIn('MAXX', result)
+
     def test_constant_aggregate_is_not_an_iterator(self):
         result = convert_tableau_formula_to_dax("MAX(1)")
         self.assertNotIn("MAXX", result)
@@ -510,14 +521,15 @@ class TestReferenceResolution(unittest.TestCase):
         )
         self.assertIn("Discount Rate", result)
 
-    def test_parameter_inlined_for_calc_column(self):
+    def test_parameter_measure_reference_is_not_inlined_for_calc_column(self):
         result = convert_tableau_formula_to_dax(
             "[Parameters].[Max Value]",
             param_map={"Max Value": "Max Value"},
             param_values={"Max Value": "100"},
             is_calc_column=True,
         )
-        self.assertIn("100", result)
+        self.assertIn("[Max Value]", result)
+        self.assertNotIn("100", result)
 
     def test_parameter_with_literal_brackets_resolves_to_valid_dax(self):
         # Tableau parameter names can embed literal '[' and escaped ']]'.
@@ -629,6 +641,37 @@ class TestComplexFormulas(unittest.TestCase):
         self.assertIn("ROUND", result)
         self.assertIn("SUM", result)
         self.assertIn("DISTINCTCOUNT", result)
+
+    def test_nested_bracket_measure_reference_resolves_after_caption_sanitizing(self):
+        raw_name = 'Late deliveries (after MT 10 Uhr) [#]] (copy)_1274800179991588875'
+        model_name = 'Late deliveries (after MT 10 Uhr) #'
+        formula = (
+            'IF NOT ISNULL([PDD adjusted (copy)_1274800179989934087]) THEN '
+            'MIN(1, MAX(0, ([PDD adjusted (copy)_1274800179989934087] - 0.85) / (0.95 - 0.85))) '
+            'ELSEIF NOT ISNULL([Cumulative deliveries until MT 10 Uhr (copy)_1274800179990704137]) THEN '
+            'MIN(1, MAX(0, ([Cumulative deliveries until MT 10 Uhr (copy)_1274800179990704137] - 0.89) / (0.99 - 0.89))) '
+            f'ELSEIF NOT ISNULL([{raw_name}]) THEN '
+            f'IF [{raw_name}] <= 0.01 THEN 1 '
+            f'ELSEIF [{raw_name}] >= 0.05 THEN 0 '
+            f'ELSE MIN(1, MAX(0, 1 - (([{raw_name}] - 0.01) / (0.05 - 0.01)))) END '
+            'ELSE NULL END'
+        )
+        result = convert_tableau_formula_to_dax(
+            formula,
+            table_name='INT_LOGISTICS_PERFORMANCE_BASE',
+            calc_map={
+                raw_name.replace('[', '').replace(']', ''): model_name,
+                'Late deliveries (after MT 10 Uhr) [#': model_name,
+            },
+            measure_names={
+                'PDD adjusted (copy)_1274800179989934087',
+                'Cumulative deliveries until MT 10 Uhr (copy)_1274800179990704137',
+                model_name,
+            },
+        )
+        self.assertIn(f'[{model_name}]', result)
+        self.assertNotIn('MINX', result)
+        self.assertNotIn('MAXX', result)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1088,3 +1131,50 @@ class TestDaxOutputQuality(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class TestTableauDateCast(unittest.TestCase):
+    def test_date_cast_has_three_dax_arguments(self):
+        result = convert_tableau_formula_to_dax("DATE(DATETRUNC('week', [Received]))", table_name='Sales')
+        self.assertIn('DATE(YEAR(', result)
+        self.assertIn('MONTH(', result)
+        self.assertIn('DAY(', result)
+        self.assertIn('WEEKDAY(', result)
+
+    def test_makedate_remains_three_argument_constructor(self):
+        self.assertEqual(convert_tableau_formula_to_dax('MAKEDATE(2026, 10, 21)'), 'DATE(2026, 10, 21)')
+
+
+class TestMeasureCaptionWhitespace(unittest.TestCase):
+    def test_reference_preserves_emitted_measure_caption(self):
+        result = convert_tableau_formula_to_dax('[Calculation_1]',
+            calc_map={'Calculation_1': '  thereof Avise IDS'},
+            measure_names={'  thereof Avise IDS'})
+        self.assertEqual(result, '[  thereof Avise IDS]')
+
+
+class TestInListConversion(unittest.TestCase):
+    def test_tableau_membership_list_uses_dax_table_constructor(self):
+        result = convert_tableau_formula_to_dax('IF [Category] IN ("Early", "On time") THEN 1 ELSE 0 END', table_name='Sales')
+        self.assertIn('IN {"Early", "On time"}', result)
+        self.assertNotIn('IN (', result)
+
+
+class TestBareNullLiteral(unittest.TestCase):
+    def test_nested_condition_translates_null(self):
+        result = convert_tableau_formula_to_dax('IF [Flag] THEN 1 ELSEIF [Other] THEN 0 ELSE NULL END', table_name='Sales')
+        self.assertIn('BLANK()', result)
+        self.assertNotIn('NULL', result)
+
+    def test_null_in_literal_and_identifier_is_preserved(self):
+        result = convert_tableau_formula_to_dax('IF [NULL] = "NULL" THEN NULL ELSE "not NULL" END', table_name='Sales')
+        self.assertIn('[NULL]', result)
+        self.assertIn('"NULL"', result)
+        self.assertIn('"not NULL"', result)
+        self.assertIn('BLANK()', result)
+
+class TestNestedElseIfScope(unittest.TestCase):
+    def test_inner_chain_closes_before_outer_else(self):
+        from dax_converter import _convert_if_structure
+        result = _convert_if_structure('IF a THEN 1 ELSEIF b THEN IF c THEN 2 ELSEIF d THEN 3 ELSE 4 END ELSE 5 END')
+        self.assertEqual(result, 'IF(a, 1, IF(b, IF(c, 2, IF(d, 3, 4)), 5))')

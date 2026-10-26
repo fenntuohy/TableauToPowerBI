@@ -493,12 +493,12 @@ def _create_field_parameters(model, parameters, main_table_name, column_table_ma
 
     existing_tables = {t.get('name', '') for t in model['model']['tables']}
 
-    # Collect all known column names and measure names
-    all_columns = set()
+    # Resolve field references only against tables that actually own them.
+    column_owners = {}
     measure_names = set()
     for table in model['model']['tables']:
         for col in table.get('columns', []):
-            all_columns.add(col.get('name', ''))
+            column_owners.setdefault(col.get('name', ''), set()).add(table.get('name', ''))
         for m in table.get('measures', []):
             measure_names.add(m.get('name', ''))
 
@@ -514,7 +514,9 @@ def _create_field_parameters(model, parameters, main_table_name, column_table_ma
 
         matching_cols = [
             v for v in allowable_values
-            if v.get('type') != 'range' and v.get('value', '') in all_columns
+            if (v.get('type') != 'range'
+                and v.get('value', '') in column_owners
+                and len(column_owners[v.get('value', '')]) == 1)
         ]
 
         if len(matching_cols) < 2:
@@ -531,7 +533,7 @@ def _create_field_parameters(model, parameters, main_table_name, column_table_ma
         rows = []
         for idx, val in enumerate(matching_cols):
             col_name = val.get('value', '')
-            col_table = column_table_map.get(col_name, main_table_name)
+            col_table = next(iter(column_owners[col_name]))
             rows.append(
                 f"(NAMEOF('{col_table}'[{col_name}]), {idx}, \"{col_name}\")"
             )

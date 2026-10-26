@@ -200,7 +200,8 @@ class TestConverterGuardMode(unittest.TestCase):
             validate_output=True,
             fallback_on_invalid=True,
         )
-        self.assertIn('TODO: DAX conversion validation failed', result)
+        self.assertIn('TODO: DAX conversion failed', result)
+        self.assertNotIn('//', result)
         self.assertIn('BLANK()', result)
 
     def test_validate_output_clean_formula_passes(self):

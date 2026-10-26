@@ -270,6 +270,7 @@ class TestPBIWorkspaceDeployer(unittest.TestCase):
             'reports': [{'id': 'rpt-001'}],
         }
         client.list_datasets.return_value = [{'id': 'ds-001'}]
+        client.list_reports.return_value = [{'id': 'rpt-001'}]
         client.refresh_dataset.return_value = {}
         client.get_refresh_history.return_value = []
         return client
@@ -361,6 +362,120 @@ class TestPBIWorkspaceDeployer(unittest.TestCase):
 
         self.assertEqual(result.status, 'succeeded')
         client.refresh_dataset.assert_called_once_with('ws-1', 'ds-001')
+
+    def test_refresh_failure_classification_fails_closed(self):
+        self.assertEqual(
+            PBIWorkspaceDeployer._refresh_failure_kind('DAX syntax error'),
+            'repairable',
+        )
+        self.assertEqual(
+            PBIWorkspaceDeployer._refresh_failure_kind('Gateway credentials missing'),
+            'stop',
+        )
+        self.assertEqual(
+            PBIWorkspaceDeployer._refresh_failure_kind('Unexpected service issue'),
+            'unknown',
+        )
+
+    def test_deploy_pbix_conflict_aborts_before_import(self):
+        client = self._make_mock_client()
+        client.list_datasets.return_value = [{'id': 'old-ds', 'name': 'Tower'}]
+        deployer = PBIWorkspaceDeployer(workspace_id='ws-1', client=client)
+
+        result = deployer.deploy_pbix('/run/Tower.pbix', 'Tower')
+
+        self.assertEqual(result.status, 'failed')
+        self.assertIn('Name conflict', result.error)
+        client.import_pbix.assert_not_called()
+
+    def test_deploy_pbix_refresh_success(self):
+        client = self._make_mock_client()
+        client.list_datasets.side_effect = [[], [{'id': 'ds-001', 'name': 'Tower'}]]
+        client.list_reports.side_effect = [[], [{'id': 'rpt-001', 'name': 'Tower'}]]
+        client.get_refresh_history.return_value = []
+        deployer = PBIWorkspaceDeployer(workspace_id='ws-1', client=client)
+        with patch.object(deployer, '_wait_for_refresh', return_value={
+            'status': 'completed', 'request_id': 'req-1',
+        }):
+            result = deployer.deploy_pbix('/run/Tower.pbix', 'Tower')
+
+        self.assertEqual(result.status, 'succeeded')
+        self.assertEqual(result.refresh['status'], 'completed')
+        client.import_pbix.assert_called_once_with(
+            'ws-1', '/run/Tower.pbix', dataset_name='Tower', overwrite=False,
+        )
+
+    def test_repair_retry_updates_only_run_owned_items_and_records_fidelity(self):
+        client = self._make_mock_client()
+        client.list_datasets.side_effect = [
+            [], [{'id': 'ds-001', 'name': 'Tower'}],
+        ]
+        client.list_reports.side_effect = [
+            [], [{'id': 'rpt-001', 'name': 'Tower'}],
+        ]
+        deployer = PBIWorkspaceDeployer(workspace_id='ws-1', client=client)
+        refresh_results = iter([
+            {'status': 'failed', 'error': 'DAX syntax error'},
+            {'status': 'completed', 'request_id': 'req-2'},
+        ])
+        repair = MagicMock(return_value={
+            'pbix_path': '/run/Tower-fixed.pbix',
+            'fidelity_findings': [{'object': 'Late KPI', 'status': 'needs_review'}],
+        })
+        with patch.object(deployer, '_wait_for_refresh', side_effect=lambda *a, **k: next(refresh_results)):
+            result = deployer.deploy_pbix(
+                '/run/Tower.pbix', 'Tower', repair_callback=repair,
+            )
+
+        self.assertEqual(result.status, 'succeeded')
+        self.assertEqual(result.repair_attempts, 1)
+        self.assertEqual(result.fidelity_findings[0]['object'], 'Late KPI')
+        self.assertEqual(client.import_pbix.call_count, 2)
+        self.assertFalse(client.import_pbix.call_args_list[0].kwargs['overwrite'])
+        self.assertTrue(client.import_pbix.call_args_list[1].kwargs['overwrite'])
+        self.assertEqual(client.import_pbix.call_args_list[1].args[1], '/run/Tower-fixed.pbix')
+
+    def test_repair_retry_refuses_changed_run_owned_dataset(self):
+        client = self._make_mock_client()
+        client.list_datasets.side_effect = [
+            [], [{'id': 'external-ds', 'name': 'Tower'}],
+        ]
+        client.list_reports.side_effect = [
+            [], [{'id': 'rpt-001', 'name': 'Tower'}],
+        ]
+        deployer = PBIWorkspaceDeployer(workspace_id='ws-1', client=client)
+        repair = MagicMock(return_value={'pbix_path': '/run/fixed.pbix'})
+        with patch.object(deployer, '_wait_for_refresh', return_value={
+            'status': 'failed', 'error': 'DAX syntax error',
+        }):
+            result = deployer.deploy_pbix(
+                '/run/Tower.pbix', 'Tower', repair_callback=repair,
+            )
+
+        self.assertEqual(result.status, 'failed')
+        self.assertIn('refusing retry overwrite', result.error)
+        client.import_pbix.assert_called_once()
+
+    def test_repair_attempts_stop_at_five(self):
+        client = self._make_mock_client()
+        client.list_datasets.side_effect = [[], *[[{'id': 'ds-001', 'name': 'Tower'}]] * 5]
+        client.list_reports.side_effect = [[], *[[{'id': 'rpt-001', 'name': 'Tower'}]] * 5]
+        deployer = PBIWorkspaceDeployer(workspace_id='ws-1', client=client)
+        with patch.object(deployer, '_wait_for_refresh', return_value={
+            'status': 'failed', 'error': 'DAX syntax error',
+        }):
+            result = deployer.deploy_pbix(
+                '/run/Tower.pbix', 'Tower',
+                repair_callback=lambda _error, attempt: {
+                    'pbix_path': f'/run/Tower-{attempt}.pbix',
+                },
+                max_repair_attempts=5,
+            )
+
+        self.assertEqual(result.status, 'failed')
+        self.assertEqual(result.repair_attempts, 5)
+        self.assertIn('Maximum repair attempts (5)', result.error)
+        self.assertEqual(client.import_pbix.call_count, 6)
 
     def test_validate_deployment_all_pass(self):
         """Validation passes when dataset exists and no refresh errors."""

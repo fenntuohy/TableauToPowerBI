@@ -104,6 +104,35 @@ class TestCompareReportTables(unittest.TestCase):
             result = compare_report_tables(extracted, project, 'Report')
         self.assertEqual(result['tables'][0]['column_coverage_percent'], 100.0)
 
+    def test_coverage_counts_physical_source_names_renamed_in_power_query(self):
+        extracted = {'datasources': [{'tables': [{'name': 'Data', 'columns': [
+            {'name': 'TRANSFER_ID'}, {'name': 'CARRIER_CODE'},
+            {'name': 'IS_PARCEL_CARRIER'}]}]}]}
+        with tempfile.TemporaryDirectory() as project:
+            tables_dir = os.path.join(project, 'Report.SemanticModel', 'definition', 'tables')
+            os.makedirs(tables_dir)
+            with open(os.path.join(tables_dir, 'Data.tmdl'), 'w', encoding='utf-8') as stream:
+                stream.write(
+                    'table Data\n'
+                    '\tcolumn \'Transfer Id\'\n'
+                    '\t\tsourceColumn: \'Transfer Id\'\n'
+                    '\tcolumn \'Carrier Code\'\n'
+                    '\t\tsourceColumn: \'Carrier Code\'\n'
+                    '\tcolumn IS_PARCEL_CARRIER\n'
+                    '\t\tsourceColumn: IS_PARCEL_CARRIER\n'
+                    '\tpartition p = m\n'
+                    '\t\tmode: import\n'
+                    '\t\tsource = ```\n'
+                    '\t\t\tlet Source = Table.RenameColumns(Input, '
+                    '{{"TRANSFER_ID", "Transfer Id"}, {"CARRIER_CODE", "Carrier Code"}})\n'
+                    '\t\t\tin Source\n'
+                    '\t\t```\n'
+                )
+            result = compare_report_tables(extracted, project, 'Report')
+
+        self.assertEqual(result['tables'][0]['missing_columns'], [])
+        self.assertEqual(result['tables'][0]['column_coverage_percent'], 100.0)
+
     def test_duplicate_table_names_are_scoped_to_each_datasource(self):
         extracted = {'datasources': [
             {'name': 'First', 'tables': [{'name': 'Extract', 'columns': [{'name': 'A'}]}]},

@@ -48,6 +48,35 @@ def _strip_brackets(s):
     return s.replace('[', '').replace(']', '')
 
 
+def extract_bracketed_groups(text):
+    """Extract Tableau bracket groups, honoring escaped literal ``]]``.
+
+    Tableau field captions may themselves contain brackets. In expressions
+    such as ``[ds].[pcto:usr:PDD [#]] (copy)_123:qk:2]`` a regex that stops at
+    the first closing bracket truncates the field and can bind a fake column.
+    """
+    groups = []
+    i = 0
+    while i < len(text or ''):
+        if text[i] != '[':
+            i += 1
+            continue
+        i += 1
+        value = []
+        while i < len(text):
+            if text[i] == ']' and i + 1 < len(text) and text[i + 1] == ']':
+                value.append(']')
+                i += 2
+            elif text[i] == ']':
+                i += 1
+                groups.append(''.join(value))
+                break
+            else:
+                value.append(text[i])
+                i += 1
+    return groups
+
+
 # Tableau line-break sentinel char (Æ or non-breaking space) optionally
 # surrounded by whitespace, AND the run carries no font/style attributes.
 _TABLEAU_LB_SENTINEL_RE = re.compile(r'^[\s]*[\u00c6\u00a0]+[\s]*$')

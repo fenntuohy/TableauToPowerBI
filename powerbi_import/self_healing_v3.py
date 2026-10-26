@@ -1705,12 +1705,16 @@ _VALID_DAX_FUNCS: set | None = None
 
 def _heal_dax_unbalanced_brackets(model, recovery=None) -> int:
     """Detect unbalanced ``[`` / ``]`` in DAX expressions and strip extras."""
+    from powerbi_import.dax_validator import _check_balanced
     repairs = 0
     for tbl in model.get('model', {}).get('tables', []) or []:
         tname = tbl.get('name', '') or ''
         for item in list(tbl.get('measures', []) or []) + list(tbl.get('columns', []) or []):
             expr = item.get('expression') or ''
             if not expr:
+                continue
+            # Escaped identifier brackets are data, not unbalanced delimiters.
+            if ']]' in expr and not _check_balanced(expr):
                 continue
             opens = expr.count('[')
             closes = expr.count(']')
@@ -1757,7 +1761,7 @@ def _heal_dax_unknown_function(model, recovery=None) -> int:
             m = _UNSUPPORTED_FUNCS_RE.search(expr)
             if m:
                 fn = m.group(1)
-                item['expression'] = f'/* TODO: {fn} has no DAX equivalent */ BLANK()'
+                item['expression'] = f'BLANK()  // {fn} has no DAX equivalent'
                 repairs += 1
                 if recovery is not None:
                     recovery.record(

@@ -646,6 +646,35 @@ class TestTotalFunction(unittest.TestCase):
             "TOTAL(AVG([Score]))", table_name="Scores")
         self.assertIn("CALCULATE", result)
 
+    def test_week_and_week_truncation_convert_for_measure(self):
+        result = convert_tableau_formula_to_dax(
+            "COUNTD(IF WEEK([Ship Date]) = WEEK(DATEADD('week', -1, "
+            "DATETRUNC('week', TODAY()))) THEN [Order ID] END)",
+            table_name='Orders',
+            column_table_map={'Ship Date': 'Orders', 'Order ID': 'Orders'},
+            validate_output=True,
+            fallback_on_invalid=True,
+        )
+        self.assertIn('WEEKNUM', result)
+        self.assertIn('WEEKDAY', result)
+        self.assertNotIn('WEEK(', result)
+        self.assertNotIn('DATETRUNC', result)
+        self.assertNotIn('TODO', result)
+
+    def test_month_truncation_inside_month_dateadd_converts(self):
+        result = convert_tableau_formula_to_dax(
+            "COUNTD(IF MONTH([Invoice Date]) = MONTH(DATEADD('month', -1, "
+            "DATETRUNC('month', TODAY()))) THEN [Invoice ID] END)",
+            table_name='Invoices',
+            column_table_map={'Invoice Date': 'Invoices', 'Invoice ID': 'Invoices'},
+            validate_output=True,
+            fallback_on_invalid=True,
+        )
+        self.assertIn('EDATE', result)
+        self.assertIn('STARTOFMONTH', result)
+        self.assertNotIn('DATETRUNC', result)
+        self.assertNotIn('TODO', result)
+
     def test_percent_of_total_pattern(self):
         """SUM(x) / TOTAL(SUM(x)) → common pattern."""
         result = convert_tableau_formula_to_dax(

@@ -215,3 +215,39 @@ class TestMain(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestQuickCalcGenerationBoundary(unittest.TestCase):
+    def test_pcto_copy_field_reaches_visual_value_well(self):
+        from pathlib import Path
+        source = 'sqlproxy.ds'
+        field = 'PDD [#] (copy)_123'
+        measure = '% of Total PDD [#] (copy)_123'
+        calc = {'name': '[PDD [#]] (copy)_123]', 'caption': 'PDD [#]',
+                'formula': 'SUM([Amount])', 'role': 'measure', 'datatype': 'real'}
+        converted = {
+            'datasources': [{'name': source, 'connection': {'type': 'Excel'},
+                'tables': [{'name': 'Sales', 'columns': [
+                    {'name': 'Region', 'datatype': 'string'},
+                    {'name': 'Amount', 'datatype': 'real'}]}],
+                'calculations': [calc]}],
+            'calculations': [calc],
+            'worksheets': [{'name': 'PDD Share', 'chart_type': 'bar', 'fields': [
+                {'name': 'Region', 'shelf': 'rows', 'datasource': source},
+                {'name': field, 'shelf': 'text', 'table_calc': 'pcto',
+                 'datasource': source}]}],
+        }
+        with tempfile.TemporaryDirectory() as output:
+            PowerBIImporter().generate_powerbi_project('QuickCalc', converted, output_dir=output)
+            project = Path(output) / 'QuickCalc'
+            visuals = list(project.glob('*.Report/definition/pages/*/visuals/*/visual.json'))
+            self.assertTrue(visuals, 'Importer must produce visual JSON')
+            visual = json.loads(visuals[0].read_text())
+            projections = visual['visual']['query']['queryState']['Y']['projections']
+            self.assertEqual(projections[0]['field']['Measure']['Property'], measure)
+            self.assertEqual(projections[0]['field']['Measure']['Expression']['SourceRef']['Entity'], 'Sales')
+            self.assertNotIn('Unresolved Tableau datasource fields', json.dumps(visual))
+            self.assertNotIn('No resolved value field', json.dumps(visual))
+            lineage = json.loads((project / 'lineage_map.json').read_text())
+            self.assertEqual(lineage['quick_table_calc_measures'][source + '\x1f' + field],
+                             ['Sales', measure])

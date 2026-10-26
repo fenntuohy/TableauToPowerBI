@@ -561,3 +561,20 @@ class TestExportSensitivityCSV(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestEscapedFormattedMeasure(unittest.TestCase):
+    def test_bracketed_measure_survives_self_healing(self):
+        from powerbi_import.tmdl_generator import _inject_dynamic_format_measures
+        from powerbi_import.tmdl_self_heal import _self_heal_model
+        table = {'name': 'Sales', 'columns': [{'name': 'Amount', 'dataType': 'Double'}],
+                 'measures': [{'name': '% of Total PDD [#]', 'expression': 'DIVIDE(1, 2)',
+                               'formatString': '0.00%'}], 'partitions': []}
+        model = {'model': {'tables': [table], 'relationships': []}}
+        _inject_dynamic_format_measures(model)
+        self.assertIn('VAR _val = [% of Total PDD [#]]]', table['measures'][-1]['expression'])
+        _self_heal_model(model)
+        from powerbi_import.self_healing_v3 import _heal_dax_unbalanced_brackets
+        self.assertEqual(_heal_dax_unbalanced_brackets(model), 0)
+        self.assertIn('VAR _val = [% of Total PDD [#]]]', table['measures'][-1]['expression'])
+        self.assertEqual([c['name'] for c in table['columns']], ['Amount'])

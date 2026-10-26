@@ -54,6 +54,20 @@ def _load_generated_tables(semantic_model_dir: str) -> Dict[str, Dict]:
     for path in sorted(glob.glob(pattern)):
         parsed = _parse_tmdl_table(path)
         if parsed:
+            try:
+                with open(path, encoding='utf-8') as stream:
+                    text = stream.read()
+            except OSError:
+                text = ''
+            # Physical source columns may be renamed in Power Query before the
+            # table reaches the model. Retain both names for source coverage.
+            renames = re.search(
+                r'Table\.RenameColumns\s*\(.*?,\s*\{(.*?)\}\s*\)', text, re.DOTALL,
+            )
+            parsed['sourceColumnRenames'] = (
+                re.findall(r'\{\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\}', renames.group(1))
+                if renames else []
+            )
             tables[parsed['name']] = parsed
     return tables
 
@@ -111,6 +125,7 @@ def compare_report_tables(extracted: Dict, project_dir: str, report_name: str) -
 
         generated_names = {name for col in match['columns']
                    for name in (col['name'], col.get('sourceColumn')) if name}
+        generated_names.update(source for source, _target in match.get('sourceColumnRenames', []))
         generated_folded = {name.casefold() for name in generated_names}
         source_counts = Counter(name.casefold() for name in src_cols)
         missing = sorted(c for c in src_cols

@@ -866,6 +866,27 @@ class ArtifactValidator:
                 content_lines.append(ln)
             content = '\n'.join(content_lines)
 
+            # NAMEOF references in field-parameter partitions are model
+            # references, but not scalar column expressions. Validate them
+            # explicitly, then omit them from the generic DAX-reference scan.
+            if 'ParameterMetadata' in raw_content or basename.endswith('FieldParam.tmdl'):
+                nameof_re = re.compile(
+                    r"NAMEOF\(\s*'((?:[^']|'')+)'\s*\[([^\]]+)\]\s*\)",
+                    re.IGNORECASE,
+                )
+                for field_match in nameof_re.finditer(content):
+                    table_ref = _norm_ref_name(field_match.group(1))
+                    col_ref = _norm_ref_name(field_match.group(2))
+                    canonical_table = known_tables_lc.get(table_ref.lower())
+                    fields = all_fields_lc.get(canonical_table, {}) if canonical_table else {}
+                    if not canonical_table or col_ref.lower() not in fields:
+                        msg = (f'Unknown column/measure [{col_ref}] in table '
+                               f"'{table_ref}' ({basename})")
+                        if msg not in seen_warnings:
+                            warnings_list.append(msg)
+                            seen_warnings.add(msg)
+                content = nameof_re.sub('', content)
+
             for match in cls._RE_DAX_REF.finditer(content):
                 table_ref = _norm_ref_name(match.group(1))
                 col_ref = _norm_ref_name(match.group(2))

@@ -483,6 +483,7 @@ class PowerBIProjectGenerator:
             with phase_timings.phase('report'):
                 report_dir = self.create_report_structure(
                     project_dir, report_name, converted_objects,
+                    quick_table_calc_measures=getattr(self, '_quick_table_calc_measure_map', {}),
                 )
             print(f"  âœ“ Report created: {report_dir}")
         elif not has_visuals:
@@ -812,6 +813,7 @@ class PowerBIProjectGenerator:
                 'actual_bim_column_categories', {})
             self._actual_bim_measure_types = stats.get('actual_bim_measure_types', {})
             self._measure_rename_map = stats.get('measure_rename_map', {})
+            self._quick_table_calc_measure_map = stats.get('quick_table_calc_measures', {})
 
             # Store table rename map for multi-datasource entity resolution.
             # When multiple datasources share the same table name, the TMDL
@@ -1766,6 +1768,12 @@ class PowerBIProjectGenerator:
         vpos = self._make_visual_position(pos, scale_x, scale_y, visual_count)
         vx, vy, vw, vh = vpos['x'], vpos['y'], vpos['width'], vpos['height']
 
+        # Dashboard controls refer to an owning worksheet; keep its default selection.
+        source_filter = next((f for f in converted_objects.get('filters', [])
+                              if f.get('worksheet') == obj.get('name')
+                              and f.get('field') == obj.get('param')), {})
+        obj = dict(obj, **{k: v for k, v in source_filter.items() if k != 'field'})
+
         # Determine slicer mode from parameter/field data type
         slicer_mode = self._detect_slicer_mode(obj, column_name, converted_objects)
 
@@ -1773,6 +1781,38 @@ class PowerBIProjectGenerator:
                                                   column_name, table_name, visual_count,
                                                   slicer_mode=slicer_mode,
                                                   title=column_name)
+        if source_filter.get('filter_mode') == 'relative-date':
+            period = source_filter.get('period', 'day')
+            count = source_filter.get('period_count', 1)
+            direction = source_filter.get('period_type', 'last')
+            unit = {'day': 0, 'week': 1, 'month': 2, 'year': 3}[period]
+            selection = {
+                'Version': 2,
+                'From': [{'Name': 't', 'Entity': table_name, 'Type': 0}],
+                'Where': [{'Condition': {'RelativeDate': {
+                    'Expression': {
+                        'Column': {
+                            'Expression': {'SourceRef': {'Source': 't'}},
+                            'Property': column_name,
+                        }
+                    },
+                    'TimeUnit': unit,
+                    'TimeUnitCount': count,
+                    'RelativeDateFilterType': {
+                        'last': 0, 'this': 1, 'next': 2,
+                    }.get(direction, 0),
+                    'IncludeToday': True,
+                }}}],
+            }
+            objects = slicer_json['visual']['objects']
+            objects['data'][0]['properties'].update({
+                'relativeRange': _L(f"'{direction.title()}'"),
+                'relativeDuration': _L(f"{count}{'D' if period == 'day' else 'W' if period == 'week' else 'M' if period == 'month' else 'Q' if period == 'quarter' else 'Y'}"),
+                'relativePeriod': _L("'" + {'day': 'Days', 'week': 'Calendar Weeks',
+                                           'month': 'Calendar Months', 'quarter': 'Calendar Quarters',
+                                           'year': 'Calendar Years'}[period] + "'"),
+            })
+            objects['general'] = [{'properties': {'filter': {'filter': selection}}}]
         _write_json(os.path.join(visual_dir, 'visual.json'), slicer_json, ensure_ascii=False)
 
     def _create_visual_parameter_control(self, visuals_dir, obj, scale_x, scale_y,
@@ -2219,7 +2259,8 @@ class PowerBIProjectGenerator:
 
         return created
 
-    def create_report_structure(self, project_dir, report_name, converted_objects):
+    def create_report_structure(self, project_dir, report_name, converted_objects,
+                                quick_table_calc_measures=None):
         """Creates the Report structure in PBIR v4.0 format (identical to PBI Hero reference)
         
         Structure:
@@ -2246,6 +2287,8 @@ class PowerBIProjectGenerator:
 
         # Build field mapping from Tableau to Power BI model
         self._build_field_mapping(converted_objects)
+        if quick_table_calc_measures is not None:
+            self._quick_table_calc_measure_map = quick_table_calc_measures
 
         # Initialize motion chart bookmarks list (may be populated by dashboard pages)
         self._motion_chart_bookmarks = []
@@ -2378,7 +2421,7 @@ class PowerBIProjectGenerator:
             }
         
         # Promote global filters and datasource-level filters to report level
-        all_report_filters = converted_objects.get('filters', []) + converted_objects.get('datasource_filters', [])
+        all_report_filters = [f for f in converted_objects.get('filters', []) if not f.get('worksheet')] + converted_objects.get('datasource_filters', [])
         if all_report_filters:
             report_level_filters = self._create_visual_filters(all_report_filters)
             if report_level_filters:
@@ -2584,7 +2627,7 @@ class PowerBIProjectGenerator:
             _write_json(os.path.join(res_dir, 'TableauMigrationTheme.json'), custom_theme)
 
         # Report-level filters
-        all_report_filters = converted_objects.get('filters', []) + converted_objects.get('datasource_filters', [])
+        all_report_filters = [f for f in converted_objects.get('filters', []) if not f.get('worksheet')] + converted_objects.get('datasource_filters', [])
         if all_report_filters:
             report_level_filters = self._create_visual_filters(all_report_filters)
             if report_level_filters:
@@ -3551,6 +3594,8 @@ class PowerBIProjectGenerator:
 
             if shelf == 'measure_value':
                 result['expanded_meas'].append(f)
+            elif f.get('_generated_measure_name'):
+                result['expanded_meas'].append(f)
             elif shelf == 'tooltip':
                 result['tooltip_fields'].append(f)
             elif shelf == 'size':
@@ -3616,7 +3661,17 @@ class PowerBIProjectGenerator:
             raw_name = f.get('name', '')
             clean = self._clean_field_name(raw_name)
             if f.get('table_calc') == 'pcto':
-                clean = f'% of Total {clean}'
+                quick_calc_base = raw_name
+                quick_calc_map = getattr(self, '_quick_table_calc_measure_map', {})
+                quick_calc_binding = quick_calc_map.get(
+                    f"{f.get('datasource', '')}\x1f{quick_calc_base}")
+                # Use the exact model measure name for both symbol resolution
+                # and shelf classification. The Tableau field caption may be
+                # escaped/sanitized and is not itself the generated measure.
+                clean = (quick_calc_binding[1] if quick_calc_binding
+                         else f'% of Total {clean}')
+                if quick_calc_binding:
+                    f = {**f, 'shelf': 'measure_value'}
             if clean in skip_names or raw_name in skip_names:
                 continue
             # Tableau action targets are interaction metadata, not model
@@ -3644,6 +3699,9 @@ class PowerBIProjectGenerator:
             if _bim_sym:
                 ds = f.get('datasource', '')
                 resolved_entity, resolved_prop = self._resolve_field_entity(clean, datasource=ds)
+                if f.get('table_calc') == 'pcto':
+                    if quick_calc_binding:
+                        resolved_entity, resolved_prop = quick_calc_binding
                 if ((resolved_entity, resolved_prop) not in _bim_sym
                         and (resolved_entity, resolved_prop.strip()) not in _bim_sym):
                     if ds and any(source.get('name') == ds
@@ -5922,7 +5980,7 @@ class PowerBIProjectGenerator:
         # Sprint 77: Check filter_mode from classified filter data
         filter_mode = obj.get('filter_mode', '')
         if filter_mode == 'relative-date':
-            return 'Basic'
+            return 'Relative'
         if filter_mode == 'wildcard':
             return 'Search'
         if filter_mode == 'top-n':

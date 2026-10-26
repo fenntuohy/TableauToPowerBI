@@ -62,6 +62,12 @@ def _auto_date_hierarchies(model):
     and a hierarchy definition on the same table.
     """
     DATE_TYPES = {'dateTime', 'date'}
+    COLUMN_CANDIDATES = {
+        'Year': ('Year',),
+        'Quarter': ('Quarter',),
+        'Month': ('Month', 'MonthName'),
+        'Day': ('Day',),
+    }
     # (label, M function, BIM dataType, ordinal)
     PARTS = [
         ('Year', 'Date.Year', 'int64', 0),
@@ -99,13 +105,17 @@ def _auto_date_hierarchies(model):
             if any(h.get('name') == hier_name for h in existing_hierarchies):
                 continue
 
-            # Add M-based columns for the parts (skip if name clashes)
+            # Reuse existing date-part columns when available; field parameters
+            # refer to those source fields by name.
             calc_col_names = []
             for part_label, m_fn, dt, _ in PARTS:
-                calc_name = f"{col_name} {part_label}"
-                if calc_name in existing_col_names:
-                    calc_col_names.append(calc_name)
+                existing_part = next((candidate for candidate in COLUMN_CANDIDATES[part_label]
+                                      if candidate in existing_col_names), None)
+                if existing_part:
+                    calc_col_names.append(existing_part)
                     continue  # already exists (e.g. from Tableau extraction)
+
+                calc_name = f"{col_name} {part_label}"
 
                 col_ref = (f'[#"{col_name}"]'
                            if _m_identifier_needs_quoting(col_name)

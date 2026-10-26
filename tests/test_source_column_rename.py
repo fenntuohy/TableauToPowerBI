@@ -28,6 +28,13 @@ class TestRenameMap(unittest.TestCase):
         m = m_rename_map(_columns('full_date'), _meta(full_date='Full Date'))
         self.assertEqual(m, {'full_date': 'Full Date'})
 
+    def test_tableau_calculation_intermediate_is_not_renamed(self):
+        columns = _columns('Calculation_12345', '[Calculation_67890]', 'Revenue')
+        metadata = _meta(Calculation_12345='Calculation 12345',
+                         **{'[Calculation_67890]': 'Calculation 67890',
+                            'Revenue': 'Turnover'})
+        self.assertEqual(m_rename_map(columns, metadata), {'Revenue': 'Turnover'})
+
     def test_a_case_only_caption_still_renames(self):
         # This is the pair the healer used to undo.
         m = m_rename_map(_columns('year'), _meta(year='Year'))

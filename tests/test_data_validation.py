@@ -47,7 +47,7 @@ def _model_project(root, measures=("Revenue",), columns=("amount",)):
     for column in columns:
         lines += [f"\tcolumn {column}", "\t\tdataType: double", ""]
     for measure in measures:
-        lines += [f"\tmeasure {measure} = SUM(Sales[amount])", ""]
+        lines += [f"\tmeasure '{measure}' = SUM(Sales[amount])", ""]
     with open(os.path.join(tables, "Sales.tmdl"), "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
     return root
@@ -108,6 +108,21 @@ class TestItDetectsRealDefects(unittest.TestCase):
             report = run_full_equivalence_suite(TABLEAU, {"project_dir": td})
         calc = [d for d in report["details"] if d["test"] == "calc:Revenue"]
         self.assertTrue(calc and calc[0]["passed"], report["details"])
+
+    def test_bracketed_tableau_caption_matches_sanitized_model_name(self):
+        tableau = {
+            "datasources": [],
+            "calculations": [{"name": "[Calculation_1]",
+                               "caption": "Planned deliveries [#]",
+                               "formula": "COUNT([TRANSFER_ID])"}],
+            "worksheets": [],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            _model_project(td, measures=("Planned deliveries #",), columns=())
+            report = run_full_equivalence_suite(tableau, {"project_dir": td})
+        calc = [d for d in report["details"] if d["test"].startswith("calc:Planned deliveries")]
+        self.assertEqual(1, len(calc), report["details"])
+        self.assertTrue(calc[0]["passed"], report["details"])
 
     def test_row_count_is_reported_as_needing_a_deployed_model(self):
         with tempfile.TemporaryDirectory() as td:

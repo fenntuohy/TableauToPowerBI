@@ -73,7 +73,7 @@ _SIMPLE_FUNCTION_MAP = [
     (r'\bCHAR\s*\(', 'UNICHAR('),
     # ATTR is handled separately in _convert_attr() — context-aware (measure vs column)
 
-    # Date functions — DATETRUNC
+    # Date functions — supported DAX time-intelligence table conversions.
     (r'\bDATETRUNC\s*\(\s*[\'"]?year[\'"]?\s*,', 'STARTOFYEAR('),
     (r'\bDATETRUNC\s*\(\s*[\'"]?quarter[\'"]?\s*,', 'STARTOFQUARTER('),
     (r'\bDATETRUNC\s*\(\s*[\'"]?month[\'"]?\s*,', 'STARTOFMONTH('),
@@ -215,11 +215,12 @@ _RE_NEWLINES = re.compile(r'[\r\n]+\s*')
 # "AIP [Indicateur nationaux][detail]").  Match the full span so the whole
 # reference is captured instead of truncating at the first ']'.
 _RE_PARAM_REF = re.compile(r'\[Parameters\]\.\[((?:[^\]]|\]\])*)\]')
-_RE_CALC_REF = re.compile(r'\[([^\]]+)\]')
+_RE_CALC_REF = re.compile(r'\[((?:[^\]]|\]\])*)\]')
 _RE_ELSEIF = re.compile(r'\bELSEIF\b', re.IGNORECASE)
 _RE_FINDNTH = re.compile(r'\bFINDNTH\s*\(', re.IGNORECASE)
 _RE_DATE_LITERAL = re.compile(r'#(\d{4})-(\d{2})-(\d{2})#')
-_RE_COLUMN_RESOLVE = re.compile(r"(?<!')\[([^\]]+)\]")
+_RE_WEEK = re.compile(r'\bWEEK\s*\(', re.IGNORECASE)
+_RE_COLUMN_RESOLVE = re.compile(r"(?<!')\[((?:[^\]]|\]\])*)\]")
 _RE_PREVIOUS_VALUE = re.compile(r'\bPREVIOUS_VALUE\s*\(', re.IGNORECASE)
 _RE_LOOKUP = re.compile(r'\bLOOKUP\s*\(', re.IGNORECASE)
 _RE_RAWSQL = re.compile(r'\bRAWSQL_(?:BOOL|INT|REAL|STR|DATE|DATETIME|SPATIAL)\s*\(', re.IGNORECASE)
@@ -304,6 +305,8 @@ def convert_tableau_formula_to_dax(formula, column_name='Measure', table_name='T
     param_map = param_map or {}
     column_table_map = column_table_map or {}
     measure_names = measure_names or set()
+    measure_names = measure_names | set(param_map.values())
+    measure_names.update(sanitize_param_brackets(name) for name in param_map.values())
     param_values = param_values or {}
     # Support both old partition_fields and new compute_using parameter
     if compute_using is None and partition_fields is not None:
@@ -346,6 +349,10 @@ def convert_tableau_formula_to_dax(formula, column_name='Measure', table_name='T
     # 3b-pre. Dedicated converters (functions needing special arg handling)
     dax = _convert_previous_value(dax, table_name, compute_using=compute_using,
                                    column_table_map=column_table_map)
+    dax = _convert_week(dax)
+    dax = _transform_func_call(dax, "IN", lambda args, inner: "IN {" + inner + "}")
+    dax = _convert_date_cast(dax)
+    dax = _convert_datetrunc(dax)
     dax = _convert_lookup(dax, table_name, compute_using=compute_using,
                            column_table_map=column_table_map)
     dax = _convert_radians_degrees(dax)
@@ -454,6 +461,11 @@ def convert_tableau_formula_to_dax(formula, column_name='Measure', table_name='T
                                                  table_columns, measure_names,
                                                  bool_columns=bool_columns)
 
+    # Tableau's bare NULL literal is DAX BLANK; preserve quoted text and identifiers.
+    dax = re.sub(r'"(?:[^" ]| |"")*"|\'(?:[^\']|\'\')*\'|\[(?:[^\]]|\]\])*\]|\bNULL\b',
+                 lambda m: 'BLANK()' if m.group(0).upper() == 'NULL' else m.group(0),
+                 dax, flags=re.IGNORECASE)
+
     # === Phase 6: Final cleanup ===
     dax = _ensure_comparison_spacing(dax)
     dax = _normalize_spaces_outside_identifiers(dax).strip()
@@ -477,8 +489,7 @@ def convert_tableau_formula_to_dax(formula, column_name='Measure', table_name='T
         if issues and fallback_on_invalid:
             preview = issues[0]
             return (
-                f'/* TODO: DAX conversion validation failed for {column_name}: {preview} */ '
-                'BLANK()'
+                f'BLANK() /* TODO: DAX conversion failed for {column_name}: {preview} */'
             )
 
     return dax
@@ -521,7 +532,7 @@ def _resolve_references(dax, calc_map, param_map, is_calc_column, param_values):
     
     # [Parameters].[Parameter X] → [caption] or inline value
     def resolve_param(m):
-        param_id = m.group(1)
+        param_id = m.group(1).replace(']]', ']')
         if param_id in param_map:
             caption = param_map[param_id]
         else:
@@ -530,16 +541,19 @@ def _resolve_references(dax, calc_map, param_map, is_calc_column, param_values):
             # ']]' escape) the same way before falling back to the raw id.
             normalized = param_id.replace('[', '').replace(']', '')
             caption = param_map.get(normalized, param_id)
-        if is_calc_column and caption in param_values:
-            return param_values[caption]
         return f'[{sanitize_param_brackets(caption)}]'
     dax = _RE_PARAM_REF.sub(resolve_param, dax)
     
     # [Calculation_xxx] → [caption]
     def resolve_calc(m):
-        ref = m.group(1)
-        if ref in calc_map:
-            return f'[{calc_map[ref]}]'
+        ref = m.group(1).replace(']]', ']')
+        normalized_ref = ref.replace('[', '').replace(']', '')
+        calc_key = ref if ref in calc_map else normalized_ref
+        if calc_key in calc_map:
+            caption = calc_map[calc_key]
+            # Strip brackets from caption to avoid broken DAX like [Status [Selected]]
+            caption = caption.replace('[', '').replace(']', '')
+            return f'[{caption}]'
         return m.group(0)
     dax = _RE_CALC_REF.sub(resolve_calc, dax)
 
@@ -551,7 +565,9 @@ def _resolve_references(dax, calc_map, param_map, is_calc_column, param_values):
     # classification mismatches (e.g. dimension-role calcs not in
     # measure_names).
     if param_values:
-        for pname in sorted(param_values, key=len, reverse=True):
+        parameter_names = set(param_map.values())
+        parameter_names.update(sanitize_param_brackets(name) for name in parameter_names)
+        for pname in sorted(set(param_values) - parameter_names, key=len, reverse=True):
             if pname not in dax:
                 continue
             repl = param_values[pname]
@@ -638,12 +654,21 @@ def _convert_if_structure(text):
     
     Handles nested structures (processed from innermost to outermost).
     """
-    # Pre-processing: ELSEIF → ELSE IF + add corresponding ENDs
-    elseif_count = len(re.findall(r'\bELSEIF\b', text, re.IGNORECASE))
-    if elseif_count > 0:
-        text = _RE_ELSEIF.sub('ELSE IF', text)
-        text = text.rstrip() + ' END' * elseif_count
-    
+    # Close each ELSEIF chain at its own END, including nested chains.
+    chains = []
+    def expand_branch(match):
+        token = match.group(0).upper()
+        if token in ('IF', 'CASE'):
+            chains.append(0)
+        elif token == 'ELSEIF' and chains:
+            chains[-1] += 1
+            return 'ELSE IF'
+        elif token == 'END' and chains:
+            return 'END' + ' END' * chains.pop()
+        return match.group(0)
+    text = re.sub(r'"(?:[^"]|"")*"|\'(?:[^\']|\'\')*\'|\[(?:[^\]]|\]\])*\]|\b(?:IF|CASE|ELSEIF|END)\b',
+                  expand_branch, text, flags=re.IGNORECASE)
+
     # Each iteration consumes exactly one IF...END, so budget by content:
     # a fixed cap silently leaves raw Tableau syntax in long chains.
     max_iter = len(re.findall(r'\bEND\b', text, re.IGNORECASE)) + 30
@@ -752,6 +777,56 @@ def _convert_dateadd(dax_str):
                 return f"EDATE({date_expr}, {number})"
         return f"DATEADD({inner})"
     return _transform_func_call(dax_str, 'DATEADD', _xf)
+
+
+def _convert_week(dax):
+    """Convert Tableau WEEK(date) to DAX WEEKNUM(date, 2) (Monday-based)."""
+    pattern = _get_func_pattern('WEEK', word_boundary=True)
+    match = pattern.search(dax)
+    while match:
+        start = match.end()
+        depth, i = 1, start
+        while i < len(dax) and depth:
+            if dax[i] == '(':
+                depth += 1
+            elif dax[i] == ')':
+                depth -= 1
+            i += 1
+        if depth:
+            return dax
+        date_expr = dax[start:i - 1].strip()
+        dax = dax[:match.start()] + f'WEEKNUM({date_expr}, 2)' + dax[i:]
+        match = pattern.search(dax, match.start() + 8)
+    return dax
+
+
+def _convert_datetrunc(dax):
+    """Convert Tableau DATETRUNC to scalar DAX expressions for supported units."""
+    pattern = _get_func_pattern('DATETRUNC', word_boundary=True)
+    match = pattern.search(dax)
+    while match:
+        start = match.end()
+        depth, i = 1, start
+        while i < len(dax) and depth:
+            if dax[i] == '(':
+                depth += 1
+            elif dax[i] == ')':
+                depth -= 1
+            i += 1
+        if depth:
+            return dax
+        args = _split_args(dax[start:i - 1])
+        replacement = dax[match.start():i]
+        if len(args) == 2:
+            unit = args[0].strip().strip("'\"").upper()
+            value = args[1].strip()
+            if unit == 'WEEK':
+                replacement = f'({value} - WEEKDAY({value}, 2) + 1)'
+            else:
+                return dax
+        dax = dax[:match.start()] + replacement + dax[i:]
+        match = pattern.search(dax, match.start() + len(replacement))
+    return dax
 
 
 def _extract_balanced_call(dax, func_name):
@@ -1299,6 +1374,16 @@ _DATE_FORMAT_MAP = {
     'HH': 'HH', 'hh': 'HH', 'mm': 'NN', 'ss': 'SS',
     'EEEE': 'DDDD', 'EEE': 'DDD',
 }
+
+def _convert_date_cast(dax):
+    """Tableau DATE takes one value; DAX DATE requires year, month and day."""
+    def _xf(args, inner):
+        if len(args) == 1:
+            value = args[0].strip()
+            return f'DATE(YEAR({value}), MONTH({value}), DAY({value}))'
+        return f'DATE({inner})'
+    return _transform_func_call(dax, 'DATE', _xf)
+
 
 def _convert_dateparse(dax):
     """DATEPARSE(format, string) → DATEVALUE(string).
@@ -2661,14 +2746,21 @@ def _resolve_columns(dax, table_name, column_table_map, measure_names,
         return col
     
     def resolve_column(m):
-        raw_col = m.group(1)
+        raw_col = m.group(1).replace(']]', ']')
         col = _resolve_col_name(raw_col)
         # Inline literal-only calc values in calc column expressions first,
         # before measure_names or column_table_map checks.
-        if is_calc_column and col in param_values:
+        if is_calc_column and col in param_values and col not in measure_names:
             return param_values[col]
         if col in measure_names:
             return f'[{_dax_escape_col(col)}]'
+        # Tableau formula refs can carry literal brackets in a caption (escaped
+        # as `]]`), while the generated TMDL measure name strips bracket chars.
+        # Resolve that same caption to the emitted measure before treating it as
+        # a physical column reference.
+        sanitized_measure = col.replace('[', '').replace(']', '')
+        if sanitized_measure in measure_names:
+            return f'[{_dax_escape_col(sanitized_measure)}]'
         if col in column_table_map:
             col_table = column_table_map[col]
             # If the column also belongs to the current table, prefer
@@ -2982,6 +3074,12 @@ def _convert_agg_expr_to_aggx(dax_text, table_name):
                     continue
 
                 inner = dax[paren_start + 1:pos - 1].strip()
+
+                # Tableau's two-argument MIN/MAX are scalar clamps (e.g.
+                # MIN(1, MAX(0, score)); DAX supports these scalar overloads.
+                # They are not column aggregations and must not become MINX/MAXX.
+                if agg in ('MIN', 'MAX') and len(_split_args(inner)) == 2:
+                    continue
 
                 if _is_single_column(inner):
                     continue
@@ -3637,4 +3735,3 @@ def convert_ismemberof_to_rls(formula, groups=None):
         dax = dax[:match.start()] + 'TRUE()' + dax[match.end():]
 
     return {'dax': dax, 'rls_roles': rls_roles}
-

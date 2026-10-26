@@ -375,6 +375,32 @@ class TestFieldParameters(unittest.TestCase):
         fp = model['model']['tables'][1]
         self.assertEqual(fp['name'], "Dimension FieldParam")
 
+    def test_field_parameter_uses_actual_owner_not_main_table_fallback(self):
+        model = {'model': {'tables': [
+            {'name': 'Invoices', 'columns': [{'name': 'Amount', 'dataType': 'double'}],
+             'measures': []},
+            {'name': 'Calendar', 'columns': [
+                {'name': 'Year', 'dataType': 'int64'},
+                {'name': 'Quarter', 'dataType': 'string'},
+            ], 'measures': []},
+        ]}}
+        param = {'caption': 'Date Parts', 'datatype': 'string', 'domain_type': 'list',
+                 'allowable_values': [{'value': 'Year'}, {'value': 'Quarter'}]}
+        _create_field_parameters(model, [param], 'Invoices', {'Year': 'Invoices'})
+        fp = next(t for t in model['model']['tables'] if t['name'] == 'Date Parts FieldParam')
+        expression = fp['partitions'][0]['source']['expression']
+        self.assertIn("NAMEOF('Calendar'[Year])", expression)
+        self.assertIn("NAMEOF('Calendar'[Quarter])", expression)
+        self.assertNotIn("NAMEOF('Invoices'", expression)
+
+    def test_field_parameter_does_not_guess_owner_for_unknown_values(self):
+        model = _base_model()
+        param = {'caption': 'Date Parts', 'datatype': 'string', 'domain_type': 'list',
+                 'allowable_values': [{'value': 'Year'}, {'value': 'Quarter'}]}
+        _create_field_parameters(model, [param], 'Sales', _column_table_map())
+        self.assertFalse(any(t['name'] == 'Date Parts FieldParam'
+                             for t in model['model']['tables']))
+
     def test_field_param_has_3_columns(self):
         model = _base_model()
         params = [{"caption": "Dim", "datatype": "string", "domain_type": "list",

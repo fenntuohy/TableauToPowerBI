@@ -36,7 +36,10 @@ class DualAxisBuilder:
         elif isinstance(axes, list) and len(axes) > 1:
             return True
 
-        return len(DualAxisBuilder._measure_fields(worksheet)) >= 2
+        # Multiple Measure Values are common in Tableau text tables and
+        # ordinary charts. They do not imply two y axes; require explicit
+        # dual-axis metadata or pane-level axes before promoting to a combo.
+        return False
 
     @staticmethod
     def extract_axis_config(worksheet: Dict[str, Any], axis_idx: int = 0) -> Dict[str, Any]:

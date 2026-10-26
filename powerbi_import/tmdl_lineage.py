@@ -74,6 +74,7 @@ def _build_lineage_map(tables, relationships, extra_objects, datasources):
         'filters': [],
         'parameters': [],
         'actions': [],
+        'quick_table_calc_measures': {},
     }
 
     # Table lineage: Tableau datasource.table → PBI table. Keep the source
@@ -240,6 +241,14 @@ def _build_lineage_map(tables, relationships, extra_objects, datasources):
     # Worksheet lineage (from extra_objects — key is '_worksheets' with
     # underscore prefix as set in pbip_generator.create_tmdl_model)
     worksheets = extra.get('_worksheets') or extra.get('worksheets') or []
+    quick_measures = {}
+    for ws in worksheets:
+        for field in ws.get('fields', []) or []:
+            generated_measure = field.get('_generated_measure_name')
+            if generated_measure:
+                quick_measures[f"{field.get('datasource', '')}\x1f{field.get('name', '')}"] = (
+                    field.get('_generated_measure_table', ''), generated_measure)
+    lineage['quick_table_calc_measures'] = quick_measures
     for ws in worksheets:
         ws_name = ws.get('name', '')
         if ws_name:

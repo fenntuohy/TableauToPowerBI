@@ -19,6 +19,7 @@ import logging
 import os
 import time
 import tempfile
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +28,17 @@ class DeploymentResult:
     """Result of a single project deployment."""
 
     def __init__(self, project_name, status='pending', import_id=None,
-                 dataset_id=None, report_id=None, error=None):
+                 dataset_id=None, report_id=None, error=None,
+                 refresh=None, repair_attempts=0, fidelity_findings=None):
         self.project_name = project_name
         self.status = status  # 'pending', 'publishing', 'succeeded', 'failed'
         self.import_id = import_id
         self.dataset_id = dataset_id
         self.report_id = report_id
         self.error = error
+        self.refresh = refresh
+        self.repair_attempts = repair_attempts
+        self.fidelity_findings = fidelity_findings or []
 
     def to_dict(self):
         return {
@@ -43,6 +48,9 @@ class DeploymentResult:
             'dataset_id': self.dataset_id,
             'report_id': self.report_id,
             'error': self.error,
+            'refresh': self.refresh,
+            'repair_attempts': self.repair_attempts,
+            'fidelity_findings': self.fidelity_findings,
         }
 
 
@@ -74,6 +82,190 @@ class PBIWorkspaceDeployer:
                 client_secret=client_secret,
                 use_managed_identity=use_managed_identity,
             )
+
+    @staticmethod
+    def _refresh_failure_kind(error):
+        """Classify known service/setup errors; unknown failures fail closed."""
+        text = (error or '').lower()
+        stop_markers = (
+            'credential', 'gateway', 'unauthorized', 'forbidden', 'permission',
+            'quota', 'capacity', 'license', 'throttl', '429', '401', '403',
+        )
+        if any(marker in text for marker in stop_markers):
+            return 'stop'
+        repair_markers = (
+            'mashup', 'expression.error', 'dax', 'token', 'syntax',
+            'column', 'table', 'key didn\'t match', 'rowset', 'partition',
+            'native queries aren\'t supported', 'cannot convert',
+        )
+        if any(marker in text for marker in repair_markers):
+            return 'repairable'
+        return 'unknown'
+
+    @staticmethod
+    def _redact_refresh_error(error):
+        """Keep useful diagnostics while stripping common credential-shaped values."""
+        text = str(error or '')
+        text = re.sub(r'(?i)bearer\s+[^\s,;]+', 'Bearer [REDACTED]', text)
+        text = re.sub(
+            r'(?i)(password|token|secret|access[_ ]?key)\s*[=:]\s*[^\s,;]+',
+            r'\1=[REDACTED]', text,
+        )
+        return text[:4000]
+
+    def _wait_for_refresh(self, dataset_id, previous_refresh=None,
+                          max_wait_seconds=1800, poll_interval=10):
+        """Wait for a refresh newer than the pre-trigger history entry."""
+        elapsed = 0
+        while elapsed < max_wait_seconds:
+            history = self.client.get_refresh_history(
+                self.workspace_id, dataset_id, top=2
+            )
+            if history:
+                latest = history[0]
+                refresh_marker = (
+                    latest.get('requestId') or latest.get('id'),
+                    latest.get('startTime'),
+                )
+                is_new = previous_refresh is None or refresh_marker != previous_refresh
+                if is_new:
+                    status = (latest.get('status') or 'Unknown').lower()
+                    if status in ('completed', 'succeeded'):
+                        return {'status': 'completed', 'request_id': refresh_marker[0]}
+                    if status in ('failed', 'disabled'):
+                        error = latest.get('serviceExceptionJson') or latest.get('error') or ''
+                        attempts = latest.get('refreshAttempts') or []
+                        if attempts:
+                            messages = [
+                                item.get('serviceExceptionJson') or item.get('message') or ''
+                                for item in attempts
+                            ]
+                            error = '\n'.join(filter(None, [str(error), *messages]))
+                        return {
+                            'status': 'failed',
+                            'request_id': refresh_marker[0],
+                            'error': self._redact_refresh_error(error),
+                        }
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+        return {
+            'status': 'timeout',
+            'error': f'Refresh timed out after {max_wait_seconds}s',
+        }
+
+    def deploy_pbix(self, pbix_path, dataset_name, *, refresh=True,
+                    repair_callback=None, max_repair_attempts=5,
+                    max_wait_seconds=1800, poll_interval=10):
+        """Import a real PBIX, monitor refresh, and retry only run-owned items.
+
+        ``repair_callback(error, attempt)`` must preserve Tableau behavior and return
+        ``{'pbix_path': ..., 'fidelity_findings': [...]}`` after validation and compilation, or
+        ``None`` to stop. Findings explain behaviors that cannot be preserved. Initial imports
+        abort on name conflicts. A retry overwrites only after the currently matching dataset and
+        report IDs still match the IDs created by this run.
+        """
+        result = DeploymentResult(project_name=dataset_name)
+        existing_datasets = [
+            item for item in self.client.list_datasets(self.workspace_id)
+            if (item.get('name') or '').casefold() == dataset_name.casefold()
+        ]
+        existing_reports = [
+            item for item in self.client.list_reports(self.workspace_id)
+            if (item.get('name') or '').casefold() == dataset_name.casefold()
+        ]
+        if existing_datasets or existing_reports:
+            result.status = 'failed'
+            result.error = 'Name conflict: existing dataset or report found; D4=C prevents overwrite.'
+            return result
+
+        overwrite = False
+        while True:
+            try:
+                imported = self.client.import_pbix(
+                    self.workspace_id, pbix_path, dataset_name=dataset_name,
+                    overwrite=overwrite,
+                )
+                result.import_id = imported.get('id')
+                if not result.import_id:
+                    raise RuntimeError('Power BI import did not return an import ID.')
+                result.status = 'publishing'
+                result = self._wait_for_import(result, max_wait_seconds, poll_interval)
+                if result.status != 'succeeded' or not result.dataset_id:
+                    return result
+            except Exception as exc:
+                result.status = 'failed'
+                result.error = f'PBIX import failed: {self._redact_refresh_error(exc)}'
+                return result
+
+            if not result.report_id:
+                result.status = 'failed'
+                result.error = 'Import succeeded without a report ID; cannot establish run ownership.'
+                return result
+
+            if not refresh:
+                return result
+
+            history = self.client.get_refresh_history(
+                self.workspace_id, result.dataset_id, top=1
+            )
+            previous_refresh = None
+            if history:
+                previous_refresh = (
+                    history[0].get('requestId') or history[0].get('id'),
+                    history[0].get('startTime'),
+                )
+            self.client.refresh_dataset(self.workspace_id, result.dataset_id)
+            refresh_result = self._wait_for_refresh(
+                result.dataset_id, previous_refresh,
+                max_wait_seconds=max_wait_seconds, poll_interval=poll_interval,
+            )
+            result.refresh = refresh_result
+            if refresh_result['status'] == 'completed':
+                result.status = 'succeeded'
+                return result
+
+            error = refresh_result.get('error', '')
+            kind = self._refresh_failure_kind(error) if refresh_result['status'] == 'failed' else 'stop'
+            if (kind != 'repairable' or repair_callback is None
+                    or result.repair_attempts >= max_repair_attempts):
+                result.status = 'failed'
+                if kind == 'repairable' and result.repair_attempts >= max_repair_attempts:
+                    result.error = f'Maximum repair attempts ({max_repair_attempts}) reached. {error}'
+                elif kind == 'repairable' and repair_callback is None:
+                    result.error = f'Repairable refresh failure requires an agent repair. {error}'
+                else:
+                    result.error = f'Refresh {refresh_result["status"]}; stopped ({kind}). {error}'
+                return result
+
+            result.repair_attempts += 1
+            try:
+                repair = repair_callback(error, result.repair_attempts)
+            except Exception as exc:
+                result.status = 'failed'
+                result.error = f'Agent repair failed: {self._redact_refresh_error(exc)}'
+                return result
+            if not isinstance(repair, dict) or not repair.get('pbix_path'):
+                result.status = 'failed'
+                result.error = f'Repair attempt {result.repair_attempts} produced no validated PBIX.'
+                return result
+            result.fidelity_findings.extend(repair.get('fidelity_findings') or [])
+
+            # The imports API is name-based, so verify both run-owned IDs immediately before replace.
+            current_datasets = [
+                item for item in self.client.list_datasets(self.workspace_id)
+                if (item.get('name') or '').casefold() == dataset_name.casefold()
+            ]
+            current_reports = [
+                item for item in self.client.list_reports(self.workspace_id)
+                if (item.get('name') or '').casefold() == dataset_name.casefold()
+            ]
+            if ([item.get('id') for item in current_datasets] != [result.dataset_id]
+                    or [item.get('id') for item in current_reports] != [result.report_id]):
+                result.status = 'failed'
+                result.error = 'Run-owned Power BI IDs changed; refusing retry overwrite.'
+                return result
+            pbix_path = repair['pbix_path']
+            overwrite = True
 
     def deploy_project(self, project_dir, dataset_name=None,
                        overwrite=True, refresh=False,

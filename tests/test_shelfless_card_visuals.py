@@ -133,6 +133,18 @@ class TestItIsStillATableWhenItShouldBe(unittest.TestCase):
     def test_an_empty_worksheet_is_not_promoted_to_a_card(self):
         self.assertEqual('table', _chart_type(_worksheet(mark='Automatic')))
 
+    def test_bar_pane_with_color_is_inferred_as_stacked_bar(self):
+        ws = ET.fromstring('''<worksheet name="AV UZB"><table>
+          <cols>[ds].[Week]</cols><rows>[ds].[Values]</rows>
+          <panes>
+            <pane><mark class="Automatic"/></pane>
+            <pane><mark class="Bar"/><encodings>
+              <color column="[ds].[none:Is UZB:nk]"/>
+            </encodings></pane>
+          </panes>
+        </table></worksheet>''')
+        self.assertEqual('stackedBarChart', _chart_type(ws))
+
 
 if __name__ == '__main__':
     unittest.main()

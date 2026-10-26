@@ -414,6 +414,21 @@ class TestBuildTableCalcClassification(unittest.TestCase):
             any(c.get('name') == 'SalesGroup' for c in result.get('columns', []))
         )
 
+    def test_parameter_dependent_calc_is_a_measure(self):
+        result = self._build(
+            [{'name': 'Selected', 'caption': 'Selected',
+              'formula': 'IF([Parameters].[Mode] = "A", [Sales], [Country])',
+              'role': 'dimension', 'datatype': 'string'}],
+            extra_dax={'param_map': {'Mode': 'Mode'},
+                       'measure_names': {'Mode'},
+                       'param_values': {'Mode': '"A"'}},
+        )
+        self.assertIn('Selected', [m['name'] for m in result['measures']])
+        self.assertNotIn('Selected', [c['name'] for c in result['columns']])
+        measure = next(m for m in result['measures'] if m['name'] == 'Selected')
+        self.assertIn('[Mode]', measure['expression'])
+        self.assertIn('"A"', measure['expression'])
+
     def test_inline_literal_measure_in_calc_col(self):
         """L1257: literal-value measure inlined into calc column formula."""
         calcs = [

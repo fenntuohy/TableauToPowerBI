@@ -719,6 +719,30 @@ class TestProcessSetsGroupsBins(unittest.TestCase):
         comb = next((c for c in cols if c["name"] == "Combined"), None)
         self.assertIsNotNone(comb)
 
+    def test_combined_group_uses_partition_caption(self):
+        model = self._make_model()
+        model['model']['tables'][0]['columns'].append(
+            {'name': 'Week Number', 'sourceColumn': 'Week Number', 'dataType': 'Int64'})
+        extra = {'groups': [{'name': 'Action (Week Number)', 'group_type': 'combined',
+                            'source_fields': ['WEEK_NUMBER']}],
+                 '_datasources': [{'columns': [{'name': '[WEEK_NUMBER]', 'caption': 'Week Number'}]}]}
+        _process_sets_groups_bins(model, extra, 'Sales', {'Week Number': 'Sales'})
+        expr = str(model['model']['tables'][0]['partitions'])
+        self.assertIn('[#"Week Number"]', expr)
+        self.assertNotIn('[#"WEEK_NUMBER"]', expr)
+
+    def test_combined_group_of_dax_column_stays_in_dax(self):
+        model = self._make_model()
+        model['model']['tables'][0]['columns'].append(
+            {'name': 'Week date', 'isCalculated': True, 'expression': 'TODAY()', 'dataType': 'DateTime'})
+        extra = {'groups': [{'name': 'Action (Week date,YEAR(Week date))', 'group_type': 'combined',
+                            'source_fields': ['Week date', 'yr:Week date:qk']}]}
+        _process_sets_groups_bins(model, extra, 'Sales', {'Week date': 'Sales'})
+        group = model['model']['tables'][0]['columns'][-1]
+        self.assertTrue(group['isCalculated'])
+        self.assertIn("YEAR('Sales'[Week date])", group['expression'])
+        self.assertNotIn('sourceColumn', group)
+
     def test_bin(self):
         model = self._make_model()
         extra = {"bins": [{"name": "Amount Bin", "source_field": "Amount", "bin_size": 100}]}
@@ -825,9 +849,9 @@ class TestCreateQuickTableCalcMeasures(unittest.TestCase):
             with open(os.path.join(output, 'definition', 'tables', 'Invoices.tmdl'),
                       encoding='utf-8') as stream:
                 content = stream.read()
-        self.assertIn("column 'Year Origin (source)'", content)
-        self.assertIn("sourceColumn: 'Year Origin'", content)
+        self.assertNotIn("column 'Year Origin (source)'", content)
         self.assertIn("column 'Year origin'", content)
+        self.assertNotIn("sourceColumn: 'Year Origin'", content)
 
     def test_distinct_physical_columns_differing_only_by_case_survive(self):
         datasources = [{'name': 'ds', 'columns': [
@@ -843,9 +867,9 @@ class TestCreateQuickTableCalcMeasures(unittest.TestCase):
                 content = stream.read()
         self.assertIn("column Siren\n", content)
         self.assertIn("sourceColumn: Siren", content)
-        self.assertIn("column 'siren (source)'", content)
-        self.assertIn("sourceColumn: siren", content)
-        self.assertIn('dataType: int64', content)
+        self.assertNotIn("column 'siren (source)'", content)
+        self.assertNotIn("sourceColumn: siren", content)
+        self.assertIn('dataType: string', content)
 
     def _make_model_and_ws(self, tc_type, tc_agg='sum'):
         model = {
@@ -879,6 +903,68 @@ class TestCreateQuickTableCalcMeasures(unittest.TestCase):
         expression = model['model']['tables'][0]['measures'][0]['expression']
         self.assertIn("COUNTROWS('Sales')", expression)
         self.assertNotIn('[Number of Records]', expression)
+
+    def test_pcto_of_calculated_measure_uses_measure_reference(self):
+        model, ws = self._make_model_and_ws('pcto')
+        ws[0]['fields'][0]['name'] = 'PDD [#] (copy)_123'
+        model['model']['tables'][0]['measures'].append({
+            'name': 'PDD #', 'expression': "COUNT('Sales'[Id])",
+        })
+        _create_quick_table_calc_measures(
+            model, ws, 'Sales', {},
+            calc_map={'PDD [#] (copy)_123': 'PDD #'},
+        )
+        generated = next(m for m in model['model']['tables'][0]['measures']
+                         if m['name'] == '% of Total PDD [#] (copy)_123')
+        self.assertEqual(
+            generated['expression'],
+            "DIVIDE([PDD #], CALCULATE([PDD #], ALL('Sales')))"),
+
+    def test_pcto_copy_field_resolves_measure_by_caption_before_copy_suffix(self):
+        model, ws = self._make_model_and_ws('pcto')
+        ws[0]['fields'][0]['name'] = 'PDD [#] (copy)_123'
+        ws[0]['fields'][0]['datasource'] = 'sqlproxy.ds'
+        model['model']['tables'][0]['measures'].append({
+            'name': 'PDD #', 'expression': "COUNT('Sales'[Id])",
+        })
+        _create_quick_table_calc_measures(
+            model, ws, 'Sales', {},
+            calc_map={'[Number of planned deliveries (copy)_456]': 'PDD #'},
+        )
+        generated = next(m for m in model['model']['tables'][0]['measures']
+                         if m['name'].startswith('% of Total PDD'))
+        self.assertIn('DIVIDE([PDD #], CALCULATE([PDD #], ALL',
+                      generated['expression'])
+
+    def test_pcto_generated_binding_map_is_returned_for_visual_projection(self):
+        model, ws = self._make_model_and_ws('pcto')
+        ws[0]['fields'][0].update({'name': 'PDD [#] (copy)_123',
+                                  'datasource': 'sqlproxy.ds'})
+        _create_quick_table_calc_measures(model, ws, 'Sales', {}, calc_map={})
+        binding = model['_quick_table_calc_measures']
+        self.assertEqual(
+            binding['sqlproxy.ds\x1fPDD [#] (copy)_123'],
+            ('Sales', '% of Total PDD [#] (copy)_123'))
+
+    def test_generated_quick_calc_binding_is_in_lineage_output(self):
+        from powerbi_import.tmdl_lineage import _build_lineage_map
+
+        model, ws = self._make_model_and_ws('pcto')
+        ws[0]['fields'][0].update({'name': 'PDD [#] (copy)_123',
+                                  'datasource': 'sqlproxy.ds'})
+        model['model']['tables'][0]['measures'].append({
+            'name': 'PDD #', 'expression': "COUNT('Sales'[Id])",
+        })
+        _create_quick_table_calc_measures(model, ws, 'Sales', {}, calc_map={})
+        lineage = _build_lineage_map(
+            model['model']['tables'], [],
+            {'_worksheets': ws, 'calculations': [{
+                'name': '[Number of planned deliveries (copy)_123]',
+                'caption': 'PDD [#]', 'formula': 'COUNT([Id])'}]},
+            [{'name': 'sqlproxy.ds', 'tables': [{'name': 'Sales', 'columns': []}]}])
+        self.assertEqual(
+            lineage['quick_table_calc_measures']['sqlproxy.ds\x1fPDD [#] (copy)_123'],
+            ('Sales', '% of Total PDD [#] (copy)_123'))
 
     def test_pctd(self):
         model, ws = self._make_model_and_ws('pctd')

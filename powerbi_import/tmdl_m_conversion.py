@@ -602,6 +602,8 @@ def m_rename_map(columns, col_metadata_map):
     renames = {}
     for col in columns:
         col_name = col.get('name', '')
+        if col_name.strip('[]').startswith('Calculation_'):
+            continue
         meta = col_metadata_map.get(col_name, {})
         caption = meta.get('caption', '')
         clean_name = col_name.strip('[]')

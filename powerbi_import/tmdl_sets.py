@@ -130,6 +130,10 @@ def _process_sets_groups_bins(model, extra_objects, main_table_name, column_tabl
             # Also build internal-name → caption mapping from datasource columns
             col_caption_map = {}
             for ds in extra_objects.get('_datasources', []):
+                for col_info in ds.get('columns', []):
+                    raw = col_info.get('name', '').strip('[]')
+                    if col_info.get('caption'):
+                        col_caption_map[raw] = col_info['caption']
                 for calc in ds.get('calculations', []):
                     raw = calc.get('name', '').replace('[', '').replace(']', '')
                     cap = (calc.get('caption', '') or raw).replace('[', '').replace(']', '')
@@ -200,6 +204,7 @@ def _process_sets_groups_bins(model, extra_objects, main_table_name, column_tabl
 
             m_parts = []
             dax_parts = []
+            requires_dax = False
             for idx, sf_raw in enumerate(source_fields):
                 # 1. Extract derivation prefix before cleaning
                 prefix_match = _RE_TMDL_DERIVATION_PREFIX.match(sf_raw)
@@ -217,6 +222,9 @@ def _process_sets_groups_bins(model, extra_objects, main_table_name, column_tabl
                 if resolved not in existing_cols and resolved not in column_table_map:
                     print(f"  ⚠ Group '{group_name}': skipping unknown source field '{sf_raw}' (resolved='{resolved}')")
                     continue
+                requires_dax = requires_dax or any(
+                    c.get('name') == resolved and c.get('isCalculated')
+                    for t in model['model']['tables'] for c in t.get('columns', []))
                 # 3. Build M column reference
                 escaped_m = resolved.replace('"', '""')
                 m_ref = f'[#"{escaped_m}"]'
@@ -237,11 +245,23 @@ def _process_sets_groups_bins(model, extra_objects, main_table_name, column_tabl
                 ref = f"'{table_ref}'[{escaped_col}]"
                 if table_ref != main_table_name:
                     ref = f"RELATED({ref})"
+                if m_func:
+                    dax_func = next((k for k, v in _FUNC_NAME_M.items() if v == m_func), None)
+                    if dax_func:
+                        ref = f'{dax_func}({ref})'
                 dax_parts.append(ref)
 
             if not m_parts:
                 # All source fields were unknown — skip this group entirely
                 print(f"  ⚠ Group '{group_name}': no valid source fields found, skipping")
+                continue
+            if requires_dax:
+                main_table['columns'].append({
+                    'name': group_name, 'dataType': 'String',
+                    'expression': ' & \" | \" & '.join(dax_parts),
+                    'isCalculated': True, 'summarizeBy': 'none', 'displayFolder': 'Groups',
+                })
+                existing_cols.add(group_name)
                 continue
             # Build M expression directly (type-safe concatenation)
             if len(m_parts) == 1:

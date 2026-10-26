@@ -376,6 +376,39 @@ class TestBuildSemanticModel(unittest.TestCase):
         measure_names = [m["name"] for m in orders.get("measures", [])]
         self.assertIn("Total Sales", measure_names)
 
+    def test_caption_reference_with_literal_brackets_resolves_to_sanitized_measure(self):
+        raw_name = 'Late deliveries (after MT 10 Uhr) [#]] (copy)_1274800179991588875'
+        emitted_name = 'Late deliveries (after MT 10 Uhr) #'
+        calc_ref = 'Late deliveries (after MT 10 Uhr) [#'
+        ds = self._make_datasource(
+            tables=[self._make_table(columns=[
+                {"name": "Amount", "datatype": "real"},
+                {"name": "Date", "datatype": "datetime"},
+            ])],
+            calculations=[
+                {
+                    "name": f"[{raw_name}]",
+                    "caption": emitted_name,
+                    "formula": "COUNT([Amount])",
+                    "role": "measure",
+                    "datatype": "integer",
+                },
+                {
+                    "name": "[Calculation_002]",
+                    "caption": "Color coding",
+                    "formula": f"IF NOT ISNULL([{calc_ref}]) THEN MIN(1, MAX(0, [{calc_ref}])) ELSE 0 END",
+                    "role": "measure",
+                    "datatype": "real",
+                },
+            ],
+        )
+        model = self._build([ds])
+        orders = next(t for t in model["model"]["tables"] if t["name"] == "Orders")
+        measures = {m["name"]: m["expression"] for m in orders.get("measures", [])}
+        self.assertIn(emitted_name, measures)
+        self.assertIn(f"[{emitted_name}]", measures["Color coding"])
+        self.assertNotIn("'Orders'[Late deliveries", measures["Color coding"])
+
     def test_date_table_auto_generated(self):
         ds = self._make_datasource(tables=[self._make_table()])
         model = self._build([ds])

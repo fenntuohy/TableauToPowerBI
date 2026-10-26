@@ -421,6 +421,10 @@ def generate_tmdl(datasources, report_name, extra_objects, output_dir,
     #          column/measure data from tables to free memory, so lineage must
     #          be captured while the data is still intact.
     lineage = _build_lineage_map(tables, rels, extra_objects, datasources)
+    # Visuals need a datasource-scoped binding from a Tableau quick-table-calc
+    # field to the generated measure created for that field.
+    quick_table_calc_measures = model.get('_quick_table_calc_measures') or {}
+    lineage['quick_table_calc_measures'] = quick_table_calc_measures
 
     # Step 2c: Write TMDL files (clears column/measure data afterward)
     _write_tmdl_files(model, output_dir)
@@ -445,6 +449,7 @@ def generate_tmdl(datasources, report_name, extra_objects, output_dir,
         'table_rename_map': model.get('_table_rename_map', {}),
         'measure_rename_map': model.get('_measure_rename_map', {}),
         'column_rename_map': model.get('_column_rename_map', {}),
+        'quick_table_calc_measures': quick_table_calc_measures,
     }
     if ir_result:
         stats['incremental_refresh'] = ir_result
@@ -526,7 +531,8 @@ def _build_semantic_model(datasources, report_name="Report", extra_objects=None,
 
     # Phases 5-12: Enrichments (sets, date table, hierarchies, params, RLS, etc.)
     _apply_semantic_enrichments(model, extra_objects, ctx['main_table_name'],
-                                ctx['column_table_map'], datasources)
+                                ctx['column_table_map'], datasources,
+                                ctx.get('dax_context', {}))
 
     # Phase 13: Composite model post-processing
     if (model_mode or 'import') == 'composite':
@@ -750,9 +756,16 @@ def _collect_semantic_context(datasources, extra_objects):
     calc_map = {}
     for calc in all_calculations:
         raw = calc.get('name', '').replace('[', '').replace(']', '')
-        caption = calc.get('caption', raw)
+        caption = calc.get('caption', raw).replace('[', '').replace(']', '')
         if raw and raw != caption:
             calc_map[raw] = caption
+            # Worksheet formulas can reference a datasource calculation by
+            # its caption (including escaped brackets), not just Calculation_*.
+            # Point both spellings at the same emitted measure name.
+            raw_caption = calc.get('caption', raw)
+            if raw_caption:
+                calc_map[raw_caption] = caption
+                calc_map[raw_caption.replace('[', '').replace(']', '')] = caption
 
     # param_map: "Parameter X" -> parameter caption
     param_map = {}
@@ -1127,7 +1140,8 @@ def _create_semantic_tables(model, ctx, datasources, extra_objects=None):
 
 
 
-def _apply_semantic_enrichments(model, extra_objects, main_table_name, column_table_map, datasources):
+def _apply_semantic_enrichments(model, extra_objects, main_table_name,
+                                column_table_map, datasources, dax_context=None):
     """Phases 5-12: Sets, date table, hierarchies, parameters, RLS, cross-table inference, perspectives."""
     is_direct_lake = model.get('_model_mode', '').lower() == 'directlake'
 
@@ -1177,8 +1191,11 @@ def _apply_semantic_enrichments(model, extra_objects, main_table_name, column_ta
                       main_table_name, column_table_map)
 
     # Phase 9b: Auto-generate measures for quick table calculations (% of total, running sum, etc.)
-    _create_quick_table_calc_measures(model, extra_objects.get('_worksheets', extra_objects.get('worksheets', [])),
-                                      main_table_name, column_table_map)
+    quick_table_calc_measures = _create_quick_table_calc_measures(
+        model, extra_objects.get('_worksheets', extra_objects.get('worksheets', [])),
+        main_table_name, column_table_map,
+        calc_map=(dax_context or {}).get('calc_map'))
+    model['_quick_table_calc_measures'] = quick_table_calc_measures
 
     # Phase 9c: Auto-generate "Number of Records" COUNTROWS measure when
     # worksheets use COUNT(*) on __tableau_internal_object_id__.
@@ -1260,29 +1277,13 @@ def _apply_semantic_enrichments(model, extra_objects, main_table_name, column_ta
                 calculated = col if col.get('expression') else (
                     previous if previous.get('expression') else None)
                 if physical is not None and calculated is not None:
-                    new_name = f"{physical['name']} (source)"
-                    counter = 2
-                    while new_name.casefold() in seen_cols:
-                        new_name = f"{physical['name']} (source {counter})"
-                        counter += 1
-                    physical['name'] = new_name
-                    seen_cols[new_name.casefold()] = physical
                     seen_cols[key] = calculated
-                    if physical is col:
-                        unique_cols.append(col)
-                    else:
+                    if calculated is col:
+                        unique_cols.remove(previous)
                         unique_cols.append(calculated)
                     continue
                 if (previous.get('sourceColumn') and col.get('sourceColumn')
                         and previous['sourceColumn'] != col['sourceColumn']):
-                    new_name = f"{cname} (source)"
-                    counter = 2
-                    while new_name.casefold() in seen_cols:
-                        new_name = f"{cname} (source {counter})"
-                        counter += 1
-                    col['name'] = new_name
-                    seen_cols[new_name.casefold()] = col
-                    unique_cols.append(col)
                     continue
                 # Duplicate column name (case-insensitive) → skip
                 print(f"  ⚕ Self-heal: Dropped duplicate column '{cname}' in '{tname}'")
@@ -1670,7 +1671,7 @@ def _inject_dynamic_format_measures(model):
                 table['measures'].append({
                     'name': fmt_name,
                     'expression': (
-                        f'VAR _val = [{name}] '
+                        f'VAR _val = [{name.replace(chr(93), chr(93) * 2)}] '
                         f'RETURN IF(ABS(_val) >= 1E9, FORMAT(_val / 1E9, "#,0.0") & "B", '
                         f'IF(ABS(_val) >= 1E6, FORMAT(_val / 1E6, "#,0.0") & "M", '
                         f'IF(ABS(_val) >= 1E3, FORMAT(_val / 1E3, "#,0.0") & "K", '
@@ -1694,7 +1695,7 @@ def _inject_dynamic_format_measures(model):
                 table['measures'].append({
                     'name': fmt_name,
                     'expression': (
-                        f'VAR _val = [{name}] '
+                        f'VAR _val = [{name.replace(chr(93), chr(93) * 2)}] '
                         f'RETURN IF(ABS(_val) <= 1, FORMAT(_val, "0.0%"), '
                         f'FORMAT(_val, "#,0.00"))'
                     ),
@@ -1715,7 +1716,7 @@ def _inject_dynamic_format_measures(model):
                 table['measures'].append({
                     'name': fmt_name,
                     'expression': (
-                        f'VAR _val = [{name}] '
+                        f'VAR _val = [{name.replace(chr(93), chr(93) * 2)}] '
                         f'RETURN IF(ABS(_val) >= 1E9, FORMAT(_val / 1E9, "#,0.0") & "B", '
                         f'IF(ABS(_val) >= 1E6, FORMAT(_val / 1E6, "#,0.0") & "M", '
                         f'IF(ABS(_val) >= 1E3, FORMAT(_val / 1E3, "#,0.0") & "K", '
@@ -1917,6 +1918,10 @@ def _build_table(table, connection, calculations, columns_metadata, dax_context=
     calc_map_ctx = dax_context.get('calc_map', {})
     param_values = dax_context.get('param_values', {})
     measure_names_ctx = dax_context.get('measure_names', set())
+    parameter_measure_names = set(dax_context.get('param_map', {}).values())
+    parameter_measure_names.update(
+        sanitize_param_brackets(name) for name in parameter_measure_names
+    )
 
     # Pre-compiled aggregation pattern (reused in pre-classification and main loop)
     _agg_pattern = re.compile(
@@ -1953,6 +1958,7 @@ def _build_table(table, connection, calculations, columns_metadata, dax_context=
         _pc_role = _pc.get('role', 'measure')
         _pc_is_literal = _pc_formula and '[' not in _pc_formula
         _pc_has_agg = bool(_agg_pattern.search(_pc_formula)) or bool(_lod_pattern.search(_pc_formula))
+        _pc_uses_parameter = bool(re.search(r'\[Parameters\]\.\[', _pc_formula, re.IGNORECASE))
         # Check for physical column refs (refs not in calc_map/measure_names)
         _pc_refs = re.findall(r'\[([^\]]+)\]', _pc_formula)
         _pc_has_col = False
@@ -1964,7 +1970,7 @@ def _build_table(table, connection, calculations, columns_metadata, dax_context=
                 break
         # A formula without aggregation that has physical column refs is a
         # calculated column regardless of Tableau's role attribute.
-        _pc_is_cc = (not _pc_is_literal) and not _pc_has_agg and (
+        _pc_is_cc = (not _pc_uses_parameter) and (not _pc_is_literal) and not _pc_has_agg and (
             _pc_role == 'dimension' or _pc_has_col
         )
         if _pc_is_cc:
@@ -2029,6 +2035,7 @@ def _build_table(table, connection, calculations, columns_metadata, dax_context=
         formula = calc.get('formula', '').strip()
         role = calc.get('role', 'measure')
         datatype = calc.get('datatype', 'string')
+        uses_parameter = bool(re.search(r'\[Parameters\]\.\[', formula, re.IGNORECASE))
 
         # Skip calculations with no formula (e.g. categorical-bin groups)
         # to avoid generating measures with empty expressions.
@@ -2091,7 +2098,7 @@ def _build_table(table, connection, calculations, columns_metadata, dax_context=
                 references_only_measures = False
                 break
 
-        is_calc_col = (not is_literal) and not has_aggregation and (
+        is_calc_col = (not uses_parameter) and (not is_literal) and not has_aggregation and (
             role == 'dimension' or has_column_refs
         )
 
@@ -2153,7 +2160,8 @@ def _build_table(table, connection, calculations, columns_metadata, dax_context=
             for ms in result_table.get("measures", []):
                 ms_name = ms.get("name", "")
                 ms_expr = ms.get("expression", "").strip()
-                if ms_expr and re.match(r'^[\d.]+$|^"[^"]*"$|^true$|^false$|^DATE\(\d+\s*,\s*\d+\s*,\s*\d+\)$|^TIME\(\d+\s*,\s*\d+\s*,\s*\d+\)$', ms_expr, re.IGNORECASE):
+                if (ms_name not in parameter_measure_names and ms_expr
+                        and re.match(r'^[\d.]+$|^"[^"]*"$|^true$|^false$|^DATE\(\d+\s*,\s*\d+\s*,\s*\d+\)$|^TIME\(\d+\s*,\s*\d+\s*,\s*\d+\)$', ms_expr, re.IGNORECASE)):
                     dax_formula = re.sub(
                         r'\[' + re.escape(ms_name) + r'\]',
                         ms_expr,
@@ -2241,16 +2249,7 @@ def _build_table(table, connection, calculations, columns_metadata, dax_context=
                 existing = result_table["columns"][existing_idx]
                 if (existing.get('name') != caption and existing.get('sourceColumn')
                         and not existing.get('expression')):
-                    original = existing['name']
-                    candidate = f'{original} (source)'
-                    counter = 2
-                    names = {col.get('name', '').casefold()
-                             for col in result_table['columns']}
-                    while candidate.casefold() in names:
-                        candidate = f'{original} (source {counter})'
-                        counter += 1
-                    existing['name'] = candidate
-                    result_table['columns'].append(bim_calc_col)
+                    result_table['columns'][existing_idx] = bim_calc_col
                 else:
                     result_table["columns"][existing_idx] = bim_calc_col
             else:
@@ -2593,7 +2592,9 @@ def _agg_for_column(model, table_name, column_name, agg_func):
     return agg_func
 
 
-def _create_quick_table_calc_measures(model, worksheets, main_table_name, column_table_map):
+def _create_quick_table_calc_measures(model, worksheets, main_table_name,
+                                      column_table_map, calc_map=None,
+                                      worksheets_for_binding=None):
     """Auto-generate DAX measures for Tableau quick table calculations.
     
     Detects fields with table_calc metadata (pcto, pctd, running_sum, rank, etc.)
@@ -2609,15 +2610,19 @@ def _create_quick_table_calc_measures(model, worksheets, main_table_name, column
     
     # Find the main table to add measures to
     target_table = None
+    target_table_name = main_table_name
     for t in model["model"]["tables"]:
         if t.get("name") == main_table_name:
             target_table = t
+            target_table_name = t.get('name', main_table_name)
             break
     if not target_table:
         return
     
     existing_measures = {m.get("name", "") for m in target_table.get("measures", [])}
+    calc_map = calc_map or {}
     added = 0
+    model['_quick_table_calc_measures'] = generated_measure_map = {}
     
     _AGG_MAP = {
         'sum': 'SUM', 'avg': 'AVERAGE', 'count': 'COUNT',
@@ -2635,12 +2640,36 @@ def _create_quick_table_calc_measures(model, worksheets, main_table_name, column
             agg_func = _AGG_MAP.get(tc_agg, 'SUM')
             tbl = column_table_map.get(field_name, main_table_name)
             agg_func = _agg_for_column(model, tbl, field_name, agg_func)
+            normalized_field = field_name.replace('[', '').replace(']', '')
+            mapped_measure = (calc_map.get(field_name)
+                              or calc_map.get(normalized_field)
+                              or calc_map.get(f'[{normalized_field}]'))
+            if not mapped_measure:
+                field_base = re.sub(r'\s*\(copy\)_\d+$', '', normalized_field,
+                                    flags=re.IGNORECASE).casefold()
+                candidates = {
+                    value.replace('[', '').replace(']', '').strip()
+                    for key, value in calc_map.items()
+                    if (key.replace('[', '').replace(']', '').strip().casefold() == field_base
+                        or value.replace('[', '').replace(']', '').strip().casefold() == field_base)
+                }
+                if len(candidates) == 1:
+                    mapped_measure = next(iter(candidates))
+            if mapped_measure:
+                mapped_measure = mapped_measure.replace('[', '').replace(']', '')
+            measure_ref = (f'[{mapped_measure}]'
+                           if mapped_measure in existing_measures else None)
             
             if tc_type == 'pcto':
                 measure_name = f"% of Total {field_name}"
+                field['_generated_measure_name'] = measure_name
+                field['_generated_measure_table'] = target_table_name
+                generated_measure_map[f"{field.get('datasource', '')}\x1f{field_name}"] = (
+                    target_table_name, measure_name)
                 if measure_name not in existing_measures:
-                    base = (f"COUNTROWS('{tbl}')" if field_name == 'Number of Records'
-                        else f"{agg_func}('{tbl}'[{field_name}])")
+                    base = (measure_ref or
+                            (f"COUNTROWS('{tbl}')" if field_name == 'Number of Records'
+                             else f"{agg_func}('{tbl}'[{field_name}])"))
                     expr = f"DIVIDE({base}, CALCULATE({base}, ALL('{tbl}')))"
                     target_table.setdefault("measures", []).append({
                         "name": measure_name,
@@ -2713,6 +2742,7 @@ def _create_quick_table_calc_measures(model, worksheets, main_table_name, column
     
     if added:
         print(f"  ✓ {added} quick table calc measures generated")
+    return generated_measure_map
 
 
 # Date-table detection and the generated Calendar live in tmdl_dates;
@@ -2946,9 +2976,3 @@ from powerbi_import.tmdl_refresh_policy import (  # noqa: E402
     _DATE_TYPE_KEYWORDS,
     _DATE_COL_KEYWORDS,
 )
-
-
-
-
-
-

@@ -909,7 +909,7 @@ class TestCustomSqlParamBinding(unittest.TestCase):
         }}
         table = {"name": "Q", "columns": []}
         result = generate_power_query_m(conn, table)
-        self.assertNotIn("Value.NativeQuery", result)
+        self.assertIn("Value.NativeQuery", result)
         self.assertIn("Sql.Database", result)
 
     def test_custom_sql_empty_params(self):
@@ -918,7 +918,7 @@ class TestCustomSqlParamBinding(unittest.TestCase):
         }}
         table = {"name": "Q", "columns": []}
         result = generate_power_query_m(conn, table)
-        self.assertNotIn("Value.NativeQuery", result)
+        self.assertIn("Value.NativeQuery", result)
 
 
 class TestQueryFoldingBuffer(unittest.TestCase):
@@ -1051,6 +1051,30 @@ class TestSnowflakeConnector(unittest.TestCase):
         result = generate_power_query_m(conn, table)
         self.assertIn("Snowflake", result)
         self.assertIn("acct", result)
+
+    def test_snowflake_uses_physical_relation_name(self):
+        result = generate_power_query_m(
+            {"type": "Snowflake", "details": {
+                "server": "acct", "database": "PROD", "schema": "REPORTING",
+                "warehouse": "WH",
+            }},
+            {"name": "Extract", "source_table": "[REPORTING].[REAL_TABLE]", "columns": []},
+        )
+        self.assertIn('[Name="REAL_TABLE"]', result)
+        self.assertNotIn('[Name="Extract"]', result)
+
+    def test_snowflake_custom_sql_uses_native_query(self):
+        sql = "WITH q AS (SELECT 1 AS id) SELECT id FROM q"
+        result = generate_power_query_m(
+            {"type": "Snowflake", "details": {
+                "server": "acct", "database": "PROD", "schema": "REPORTING",
+                "warehouse": "WH",
+            }},
+            {"name": "Extract", "custom_sql": sql, "columns": []},
+        )
+        self.assertIn("Value.NativeQuery", result)
+        self.assertIn(sql, result)
+        self.assertNotIn('[Name="Extract"]', result)
 
 
 class TestTeradataConnector(unittest.TestCase):

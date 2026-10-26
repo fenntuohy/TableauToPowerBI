@@ -83,7 +83,10 @@ def _m_escape_string(value):
     Doubles any internal double-quote characters so that ``"server""name"``
     is produced for a value containing a literal quote.
     """
-    return (value or '').replace('"', '""')
+    return ((value or '').replace('"', '""')
+            .replace('\r\n', '#(cr)#(lf)')
+            .replace('\r', '#(cr)')
+            .replace('\n', '#(lf)'))
 
 
 def _m_literal(value):
@@ -250,15 +253,21 @@ def _gen_m_snowflake(details, table_name, columns):
     database = _m_escape_string(details.get('database', 'MY_DB'))
     warehouse = _m_escape_string(details.get('warehouse', 'MY_WH'))
     schema = _m_escape_string(details.get('schema', 'PUBLIC'))
-    tbl = _m_escape_string(table_name)
+    source_table = details.get('_source_table', '')
+    object_parts = [part.strip().strip('[]') for part in source_table.replace('].[', '.').split('.') if part.strip()]
+    tbl = _m_escape_string(object_parts[-1] if object_parts else table_name)
+    source_schema = _m_escape_string(object_parts[-2] if len(object_parts) > 1 else schema)
     safe = '#"' + table_name + ' Table"'
 
     m_query = 'let\n'
     m_query += f'    // Source Snowflake: {server}\n'
     m_query += f'    Source = Snowflake.Databases("{server}", "{warehouse}"),\n'
     m_query += f'    #"{database}" = Source{{[Name="{database}"]}}[Data],\n'
-    m_query += f'    #"{schema}" = #"{database}"{{[Name="{schema}"]}}[Data],\n'
-    m_query += f'    {safe} = #"{schema}"{{[Name="{tbl}"]}}[Data],\n'
+    if details.get('sql_query'):
+        m_query += f'    {safe} = Value.NativeQuery(#"{database}", {_m_literal(details["sql_query"])}, null, [EnableFolding=true]),\n'
+    else:
+        m_query += f'    #"{source_schema}" = #"{database}"{{[Name="{source_schema}"]}}[Data],\n'
+        m_query += f'    {safe} = #"{source_schema}"{{[Name="{tbl}"]}}[Data],\n'
     m_query += f'    Result = {safe}\nin\n    Result'
     return m_query
 
@@ -581,9 +590,9 @@ def _gen_m_custom_sql(details, table_name, columns):
         m_query += sql_escaped
         m_query += f'", [{param_items}], [EnableFolding=true]),\n'
     else:
-        m_query += f'    Source = Sql.Database("{server}", "{database}", [Query="'
+        m_query += f'    Source = Value.NativeQuery(Sql.Database("{server}", "{database}"), "'
         m_query += sql_escaped
-        m_query += '"]),\n'
+        m_query += '", null, [EnableFolding=true]),\n'
     m_query += '    Result = Source\nin\n    Result'
     return m_query
 
@@ -1290,6 +1299,9 @@ def generate_power_query_m(connection, table):
     if source_table:
         details = dict(details)
         details['_source_table'] = source_table
+    if table.get('custom_sql'):
+        details = dict(details)
+        details['sql_query'] = table['custom_sql']
 
     generator = _M_GENERATORS.get(conn_type)
     if generator is None and isinstance(conn_type, str):
@@ -2057,64 +2069,17 @@ def m_transform_try_otherwise(step_name, expression, fallback_expression):
 
 def wrap_source_with_try_otherwise(m_query, empty_table_columns=None):
     """
-    Wrap the Source step of an M query with try...otherwise for graceful error handling.
-
-    If the data source is unavailable, returns an empty table with the expected schema
-    instead of failing with an error.
-
-    When the step immediately after Source is a key-based navigation on Source
-    (e.g. ``Source{[Item="Sheet1",Kind="Sheet"]}[Data]``), the navigation step is
-    absorbed into the try block so the fallback replaces the full chain.
+    No-op: the try...otherwise pattern creates unbalanced let/in blocks that
+    Power BI Service cannot compile. The fallback #table() is not useful since
+    Snowflake credentials are configured at the service level.
 
     Args:
         m_query: str — Complete M query (let ... in ...)
         empty_table_columns: optional list of column name strings for the fallback table
     Returns:
-        str — Modified M query with Source wrapped in try...otherwise
+        str — Unmodified M query
     """
-    import re as _re
-
-    # Find "Source = ..." line
-    match = _re.search(r'(\n\s*)(Source\s*=\s*)', m_query)
-    if not match:
-        return m_query
-
-    indent = match.group(1)
-    source_assign = match.group(2)
-    after_assign = m_query[match.end():]
-
-    # Skip if Source is already wrapped with try...otherwise
-    if after_assign.strip().startswith('try'):
-        return m_query
-
-    # Find the end of the Source expression (next line starting with a step name or 'in')
-    lines = after_assign.split('\n')
-    # Find how many lines belong to the Source expression
-    # Track nesting depth to avoid matching option keys inside [...] or (...)
-    source_lines = []
-    remaining_idx = len(lines)
-    nesting = 0
-    for idx, line in enumerate(lines):
-        stripped = line.strip()
-        # Update nesting based on brackets/parens in this line
-        for ch in line:
-            if ch in ('(', '['):
-                nesting += 1
-            elif ch in (')', ']'):
-                nesting -= 1
-        if idx > 0 and nesting <= 0 and (stripped.startswith('#"') or stripped.startswith('Result')
-                        or stripped == 'in' or _re.match(r'\w+\s*=', stripped)):
-            remaining_idx = idx
-            break
-        source_lines.append(line)
-
-    source_expr = '\n'.join(source_lines).rstrip().rstrip(',')
-    consumed_lines = len(source_lines)
-
-    # Check if the NEXT step is a key-based navigation on Source.
-    # Pattern: <step_name> = Source{[...]}[Data],
-    # If so, absorb it into the try block so the fallback replaces both.
-    nav_step_name = None
+    return m_query
     if remaining_idx < len(lines):
         next_stripped = lines[remaining_idx].strip()
         nav_match = _re.match(
@@ -2448,4 +2413,3 @@ def generate_table_extension_query(extension):
             f'in\n'
             f'    Source'
         )
-

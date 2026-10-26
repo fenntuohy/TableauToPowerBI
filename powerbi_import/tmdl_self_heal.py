@@ -246,7 +246,7 @@ def _self_heal_model(model, recovery=None):
                     continue
                 unresolved_columns.append(q_col)
 
-            refs = re.findall(r'\[([^\]]+)\]', expr)
+            refs = [ref.replace(']]', ']') for ref in re.findall(r'\[((?:[^\]]|\]\])+)\]', expr)]
             for ref in refs:
                 if ref in table_columns.get(tname, set()):
                     continue
@@ -403,7 +403,7 @@ def _self_heal_model(model, recovery=None):
                 repairs += 1
 
             # Also check bare [ColumnName] references (not qualified)
-            bare_refs = re.findall(r'\[([^\]]+)\]', expr)
+            bare_refs = [ref.replace(']]', ']') for ref in re.findall(r'\[((?:[^\]]|\]\])+)\]', expr)]
             for ref in bare_refs:
                 if ref == col.get('name'):
                     self_referential.append(col)

@@ -13,6 +13,17 @@ def test_dual_axis_detection_with_axes_flag():
     assert DualAxisBuilder.detect_dual_axis_worksheet(worksheet) is True
 
 
+def test_multiple_measures_alone_do_not_promote_a_table_to_dual_axis():
+    worksheet = {
+        'axes': {'dual_axis': False, 'dual_axis_sync': False},
+        'fields': [
+            {'name': 'Revenue', 'shelf': 'measure_value'},
+            {'name': 'Profit', 'shelf': 'measure_value'},
+        ],
+    }
+    assert DualAxisBuilder.detect_dual_axis_worksheet(worksheet) is False
+
+
 def test_reference_line_normalization():
     worksheet = {
         "reference_lines": [
