@@ -99,11 +99,17 @@ _DOUBLE_ESCAPED_OPERATORS = (
     ('&lt;&lt;=', '<='),
     ('&lt;&lt;', '<'),
     # ``>>=`` / ``<<=`` are not valid SQL in any dialect, so a decoded form is
-    # unambiguously double-encoding. A bare ``>>`` is NOT rewritten: it is a
-    # legitimate bit-shift operator, and only the encoded ``&gt;&gt;`` above
-    # proves corruption.
+    # unambiguously double-encoding.
     ('>>=', '>='),
     ('<<=', '<='),
+    # A bare ``>>`` / ``<<`` is normally a bit-shift and must be preserved, so
+    # the encoded forms above are the only safe signal. This workbook also
+    # carries a *decoded* ``cumulative_balance_eur >> 0`` (from a stored
+    # ``&gt;&gt; 0``), which Snowflake rejects with "unexpected '>>'". Snowflake
+    # has no scalar bitshift operator in a WHERE predicate, so a decoded ``>>``
+    # can only be corruption: rewrite it to '>'.
+    ('>> ', '> '),
+    ('<< ', '< '),
 )
 
 

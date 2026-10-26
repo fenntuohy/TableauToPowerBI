@@ -1477,10 +1477,12 @@ class TestNormaliseCustomSql(unittest.TestCase):
         self.assertEqual(_normalise_custom_sql("WHERE a >>= 1"), "WHERE a >= 1")
         self.assertEqual(_normalise_custom_sql("WHERE a <<= 1"), "WHERE a <= 1")
 
-    def test_bare_bitshift_is_preserved(self):
+    def test_double_encoded_bare_operand_is_repaired(self):
         from tableau_export.m_query_builder import _normalise_custom_sql
-        # A bare >> may be a legitimate Snowflake bit-shift; do not rewrite it.
-        self.assertEqual(_normalise_custom_sql("WHERE a >> 0"), "WHERE a >> 0")
+        # The workbook stores a *decoded* '>> 0' (from '&gt;&gt; 0'). Snowflake
+        # rejects it with "unexpected '>>'", so it can only be corruption.
+        self.assertEqual(_normalise_custom_sql("WHERE a >> 0"), "WHERE a > 0")
+        self.assertEqual(_normalise_custom_sql("WHERE a << 0"), "WHERE a < 0")
 
     def test_hash_quote_inside_sql_is_broken_up(self):
         from tableau_export.m_query_builder import _normalise_custom_sql
