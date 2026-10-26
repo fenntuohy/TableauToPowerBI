@@ -44,6 +44,7 @@ from datasource_extractor import (
     map_tableau_to_powerbi_type,
     sanitize_param_brackets,
 )
+from extract_primitives import extract_bracketed_groups
 from m_query_builder import (
     inject_m_steps,
     m_transform_rename,
@@ -935,6 +936,24 @@ def _collect_semantic_context(datasources, extra_objects):
         'ds_column_table_map': ds_column_table_map,
         'datasource_table_map': datasource_table_map,
     }
+
+    # Map each calculation's internal name -> caption, so formulas that
+    # reference a renamed field by internal name (e.g.
+    # '[[ADR]] Defaulted Assets (copy)_123]') resolve to the caption the
+    # model and every lookup map are keyed by. Without this the ref misses
+    # all maps, is emitted as a physical column and becomes a self-reference.
+    ref_alias_map = {}
+    for _c in (all_calculations or []):
+        _raw = (_c.get('name') or '').strip()
+        _cap = (_c.get('caption') or '').strip()
+        if not _raw or not _cap:
+            continue
+        _raw_inner = _raw[1:-1].replace(']]', ']') if (
+            _raw.startswith('[') and _raw.endswith(']')) else _raw
+        _cap_inner = _cap
+        if _raw_inner and _cap_inner and _raw_inner != _cap_inner:
+            ref_alias_map[_raw_inner] = _cap_inner
+    dax_context['ref_alias_map'] = ref_alias_map
 
     # Build compute_using_map from worksheet table_calcs for PARTITIONBY/ORDERBY
     # Maps calc field name → list of compute-using dimension names
@@ -1949,6 +1968,32 @@ def _build_table(table, connection, calculations, columns_metadata, dax_context=
     # dimension-role calc that concatenates other calc-columns (e.g.
     # Filière = Nucléaire_vrai & Réseaux_vrai & NSE_vrai) is incorrectly
     # demoted to a measure because the refs appear in calc_map/measure_names.
+    # Internal name -> caption. Formulas may reference a renamed field by its
+    # Tableau internal name while every map here is keyed by caption; without
+    # this the ref looks like an unknown physical column, which flips the
+    # classification of a measure into a calculated column. A calc column
+    # cannot reference a measure in DAX, so that misclassification surfaces at
+    # refresh as "A circular dependency was detected".
+    _ref_alias = {}
+    for _c in calculations:
+        _raw = (_c.get('name') or '').strip()
+        _cap = (_c.get('caption') or '').strip()
+        if not _raw or not _cap:
+            continue
+        # Parse rather than strip: a name may itself contain brackets, so
+        # '[1:-1]' leaves a stray ']' and the key never matches the refs
+        # produced by the bracket-aware parser.
+        # Internal names are stored bracket-wrapped with ']]' escaping a
+        # literal ']', so '[[ADR]] Foo]' denotes the name '[ADR] Foo'. The
+        # caption is authored already-unwrapped ('[ADR] Foo'), and the
+        # bracket-aware formula parser yields the same unwrapped form - so key
+        # and value must both be normalised this way or they never match.
+        _raw_inner = _raw[1:-1].replace(']]', ']') if (
+            _raw.startswith('[') and _raw.endswith(']')) else _raw
+        _cap_inner = _cap
+        if _raw_inner and _cap_inner and _raw_inner != _cap_inner:
+            _ref_alias[_raw_inner] = _cap_inner
+
     prelim_calc_col_captions = set()
     prelim_calc_col_raws = set()
     for _pc in calculations:
@@ -1960,7 +2005,8 @@ def _build_table(table, connection, calculations, columns_metadata, dax_context=
         _pc_has_agg = bool(_agg_pattern.search(_pc_formula)) or bool(_lod_pattern.search(_pc_formula))
         _pc_uses_parameter = bool(re.search(r'\[Parameters\]\.\[', _pc_formula, re.IGNORECASE))
         # Check for physical column refs (refs not in calc_map/measure_names)
-        _pc_refs = re.findall(r'\[([^\]]+)\]', _pc_formula)
+        _pc_refs = [_ref_alias.get(_r, _r)
+                    for _r in extract_bracketed_groups(_pc_formula)]
         _pc_has_col = False
         for _r in _pc_refs:
             if _r == _pc_caption or _r.startswith('Parameters'):
@@ -1992,7 +2038,8 @@ def _build_table(table, connection, calculations, columns_metadata, dax_context=
             if _pc_name not in prelim_calc_col_raws:
                 continue
             _pc_formula = _pc.get('formula', '').strip()
-            _pc_refs = re.findall(r'\[([^\]]+)\]', _pc_formula)
+            _pc_refs = [_ref_alias.get(_r, _r)
+                        for _r in extract_bracketed_groups(_pc_formula)]
             _pc_only_measures = True
             _pc_has_refs = False
             for _r in _pc_refs:
@@ -2077,7 +2124,8 @@ def _build_table(table, connection, calculations, columns_metadata, dax_context=
 
         # Classify: calculated column or measure
         has_aggregation = bool(_agg_pattern.search(formula)) or bool(_lod_pattern.search(formula))
-        refs_in_formula = re.findall(r'\[([^\]]+)\]', formula)
+        refs_in_formula = [_ref_alias.get(_r, _r)
+                            for _r in extract_bracketed_groups(formula)]
         has_column_refs = False
         references_only_measures = True
         for ref in refs_in_formula:
@@ -2143,6 +2191,7 @@ def _build_table(table, connection, calculations, columns_metadata, dax_context=
             compute_using=dax_context.get('compute_using_map', {}).get(calc_name)
                           or dax_context.get('compute_using_map', {}).get(caption),
             table_columns=_this_table_columns,
+            ref_alias_map=dax_context.get('ref_alias_map'),
             bool_columns=_bool_table_columns,
             validate_output=True,
             fallback_on_invalid=True,

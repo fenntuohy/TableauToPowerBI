@@ -1361,3 +1361,51 @@ class TestDaxInSetLiteral(unittest.TestCase):
         self.assertIn('List.Contains', m)
         self.assertNotIn('then "b"', m)
         self.assertEqual(m, 'if List.Contains({"a", "b"}, [x]) then "Yes" else "No"')
+
+
+class TestNestedBracketInternalName(unittest.TestCase):
+    """A field whose name contains brackets must not become a self-reference.
+
+    Tableau stores such a field as '[[ADR]] Defaulted Assets (copy)_123]' -
+    bracket-wrapped, with ']]' escaping a literal ']'. Referencing it naively
+    truncated the name, missed every caption-keyed map, and emitted
+    'Table'[<internal>] on the table's own column, which Power BI reports as
+    'A circular dependency was detected'.
+    """
+
+    def test_bracket_aware_parser_keeps_nested_name(self):
+        from tableau_export.extract_primitives import extract_bracketed_groups
+        refs = extract_bracketed_groups(
+            '([[ADR]] Defaulted Assets (copy)_123] / [Calc_1])')
+        self.assertEqual(refs, ['[ADR] Defaulted Assets (copy)_123', 'Calc_1'])
+
+    def test_internal_name_normalises_to_caption_form(self):
+        raw = '[[ADR]] Defaulted Assets (copy)_123]'
+        self.assertEqual(raw[1:-1].replace(']]', ']'),
+                         '[ADR] Defaulted Assets (copy)_123')
+
+    def test_ref_rewrites_to_caption_instead_of_self_reference(self):
+        from tableau_export.dax_converter import _resolve_columns
+        alias = {'[ADR] Defaulted Assets (copy)_123':
+                 '[ADR] Defaulted Assets (180 DPD)'}
+        cmap = {'[ADR] Defaulted Assets (180 DPD)': 'Extract'}
+        out = _resolve_columns(
+            '([[ADR]] Defaulted Assets (copy)_123] / [X])',
+            'Extract', cmap, set(), True, {}, None, ref_alias_map=alias)
+        # Resolved via the caption, not left as the truncated internal name.
+        # The caption's own ']' is escaped as ']]' inside the ref, so compare
+        # on the escaped form.
+        self.assertIn('ADR]] Defaulted Assets (180 DPD)', out)
+        self.assertNotIn('(copy)_123', out)
+
+
+class TestCaseWhenInBecomesSwitchTrue(unittest.TestCase):
+    """Tableau tolerates `CASE x WHEN IN ('a','b') THEN`, DAX does not."""
+
+    def test_case_when_in_emits_switch_true(self):
+        from tableau_export.dax_converter import convert_tableau_formula_to_dax
+        f = ("CASE [Spv] WHEN IN ('a','b') THEN 0.0019 "
+             "WHEN IN ('c') THEN 0.0021 END")
+        out = convert_tableau_formula_to_dax(f, table_name='Extract')
+        self.assertTrue(out.startswith('SWITCH(TRUE()'), out)
+        self.assertIn('IN {', out)

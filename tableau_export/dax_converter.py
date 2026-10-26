@@ -220,6 +220,64 @@ _RE_ELSEIF = re.compile(r'\bELSEIF\b', re.IGNORECASE)
 _RE_FINDNTH = re.compile(r'\bFINDNTH\s*\(', re.IGNORECASE)
 _RE_DATE_LITERAL = re.compile(r'#(\d{4})-(\d{2})-(\d{2})#')
 _RE_WEEK = re.compile(r'\bWEEK\s*\(', re.IGNORECASE)
+def _resolve_refs_in_fragment(fragment, resolve_one):
+    """Substitute each ``[field]`` ref using a bracket-aware scan.
+
+    ``resolve_one`` receives a match-like object exposing ``group(1)`` so the
+    existing resolver callables keep working unchanged. A bare ``[field]`` is
+    skipped when it is already qualified as ``'Table'[field]``.
+    """
+    if '[' not in fragment:
+        return fragment
+    out = []
+    last = 0
+    for start, end, inner in _iter_column_ref_spans(fragment):
+        # Skip refs already preceded by an explicit 'Table' qualifier.
+        if start > 0 and fragment[start - 1] == "'":
+            continue
+        out.append(fragment[last:start])
+        class _M:
+            group = staticmethod(lambda _i, _v=inner: _v)
+        out.append(resolve_one(_M()))
+        last = end
+    out.append(fragment[last:])
+    return ''.join(out)
+
+
+def _iter_column_ref_spans(text):
+    """Yield (start, end, inner_name) for Tableau [field] refs in *text*.
+
+    A Tableau field name may contain brackets, so ``[[ADR]] Defaulted Assets]``
+    is one ref whose name is ``[ADR] Defaulted Assets`` - not two refs. A plain
+    regex stops at the first ``]`` and silently truncates the name, which later
+    resolves to nothing and is emitted as a malformed ``'Table'[[ADR] ...]``.
+    Power BI reads that as a self-reference and reports a circular dependency.
+
+    Mirrors :func:`extract_primitives.extract_bracketed_groups` but also reports
+    spans so the caller can substitute each ref in place.
+    """
+    i = 0
+    n = len(text or '')
+    while i < n:
+        if text[i] != '[':
+            i += 1
+            continue
+        start = i
+        i += 1
+        buf = []
+        while i < n:
+            if text[i] == ']' and i + 1 < n and text[i + 1] == ']':
+                buf.append(']')
+                i += 2
+            elif text[i] == ']':
+                i += 1
+                yield (start, i, ''.join(buf))
+                break
+            else:
+                buf.append(text[i])
+                i += 1
+
+
 _RE_COLUMN_RESOLVE = re.compile(r"(?<!')\[((?:[^\]]|\]\])*)\]")
 _RE_PREVIOUS_VALUE = re.compile(r'\bPREVIOUS_VALUE\s*\(', re.IGNORECASE)
 _RE_LOOKUP = re.compile(r'\bLOOKUP\s*\(', re.IGNORECASE)
@@ -273,6 +331,7 @@ def convert_tableau_formula_to_dax(formula, column_name='Measure', table_name='T
                                     calc_datatype=None, partition_fields=None,
                                     compute_using=None, table_columns=None,
                                     bool_columns=None,
+                                    ref_alias_map=None,
                                     validate_output=False,
                                     fallback_on_invalid=False):
     """
@@ -422,7 +481,8 @@ def convert_tableau_formula_to_dax(formula, column_name='Measure', table_name='T
     
     # === Phase 5: Resolve remaining columns [col] → 'Table'[col] ===
     dax = _resolve_columns(dax, table_name, column_table_map, measure_names,
-                           is_calc_column, param_values, table_columns=table_columns)
+                           is_calc_column, param_values, table_columns=table_columns,
+                           ref_alias_map=ref_alias_map)
 
     # === Phase 5a: Fix STARTOF* for calculated columns ===
     if is_calc_column:
@@ -642,7 +702,31 @@ def _convert_case_structure(text):
         if else_val:
             switch_args.append(else_val)
         
-        replacement = f'SWITCH({", ".join(switch_args)})'
+        # Tableau tolerates ``CASE [x] WHEN IN ('a','b') THEN ... END``, where
+        # the WHEN carries its own membership test instead of a plain value.
+        # DAX SWITCH cannot express that as a simple case/value pair: emitting
+        # SWITCH([x], IN {"a","b"}, ...) is invalid, and it also leaves a raw
+        # ``IN {`` which the M converter then mangles. Rewrite to the
+        # boolean form, which is the correct reading of the Tableau:
+        #   SWITCH(TRUE(), [x] IN {"a","b"}, val, ...)
+        if expr and any(str(a).strip().upper().startswith('IN ')
+                        for a in switch_args[1::2]):
+            bool_args = ['TRUE()']
+            for i in range(1, len(switch_args) - 1, 2):
+                when_val = switch_args[i]
+                then_val = switch_args[i + 1]
+                when_stripped = str(when_val).strip()
+                if when_stripped.upper().startswith('IN '):
+                    operand = when_stripped[3:].strip()
+                    bool_args.append(f'{expr} IN {operand}')
+                else:
+                    bool_args.append(f'{expr} = {when_stripped}')
+                bool_args.append(then_val)
+            if len(switch_args) % 2 == 0:
+                bool_args.append(switch_args[-1])
+            replacement = f'SWITCH({", ".join(bool_args)})'
+        else:
+            replacement = f'SWITCH({", ".join(switch_args)})'
         text = text[:m.start()] + replacement + text[m.end():]
     
     return text
@@ -2710,8 +2794,50 @@ def _convert_total_function(dax, table_name):
 
 # ── Phase 5: Column resolution ───────────────────────────────────────────────
 
+def _rewrite_refs_via_alias_map(dax, alias_map):
+    """Rewrite ``[internal_name]`` refs to the caption the model is keyed by.
+
+    Tableau references a field either by its caption or by its internal name,
+    and for renamed fields these differ - e.g. the formula carries
+    ``[[ADR]] Defaulted Assets (copy)_0014493203140709]`` while the model and
+    every lookup map use the caption ``[ADR] Defaulted Assets (180 DPD)``.
+
+    Unresolved refs fall through to the "physical column" path and are emitted
+    as ``'Table'[[ADR] ...]``, which Power BI reads as a self-reference on the
+    table's own calculated column - surfacing as "A circular dependency was
+    detected". Rewriting here, at the point the formula enters column
+    resolution, keeps every downstream map caption-keyed and consistent.
+    """
+    if not alias_map or '[' not in dax:
+        return dax
+
+    # Bracket-aware scan: the internal name itself contains '[...]', so a plain
+    # regex would truncate it at the first ']' and never match an alias key.
+    out = []
+    last = 0
+    for start, end, inner in _iter_column_ref_spans(dax):
+        target = alias_map.get(inner)
+        if target is None:
+            stripped = inner.replace('[', '').replace(']', '')
+            target = alias_map.get(stripped)
+        if target is None:
+            continue
+        out.append(dax[last:start])
+        # The caption is the *unwrapped* name but may itself contain brackets
+        # ('[ADR] Foo'). Embed it the way Tableau does: escape each inner ']'
+        # as ']]' and wrap once. Emitting it bare would nest brackets and the
+        # resolver would truncate the ref a second time.
+        out.append('[' + target.replace(']', ']]') + ']')
+        last = end
+    if last == 0:
+        return dax
+    out.append(dax[last:])
+    return ''.join(out)
+
+
 def _resolve_columns(dax, table_name, column_table_map, measure_names,
-                     is_calc_column, param_values, table_columns=None):
+                     is_calc_column, param_values, table_columns=None,
+                     ref_alias_map=None):
     """Resolve [col] → 'Table'[col] with cross-table RELATED() support.
 
     When *table_columns* is provided (set of column names belonging to the
@@ -2721,6 +2847,12 @@ def _resolve_columns(dax, table_name, column_table_map, measure_names,
     share table names and their columns are merged).
     """
     _local_cols = table_columns or set()
+
+    # Normalise internal-name refs to captions before any map lookup. A renamed
+    # field referenced by internal name otherwise misses every caption-keyed map
+    # and falls through to the physical-column path, emitting 'Table'[<internal>]
+    # which Power BI reads as a self-reference -> circular dependency.
+    dax = _rewrite_refs_via_alias_map(dax, ref_alias_map)
 
     def _dax_escape_col(col_name):
         return col_name.replace(']', ']]')
@@ -2780,8 +2912,8 @@ def _resolve_columns(dax, table_name, column_table_map, measure_names,
         if idx % 2 == 1:
             # Inside a double-quoted string literal — keep as-is
             resolved.append(part)
-        else:
-            resolved.append(_RE_COLUMN_RESOLVE.sub(resolve_column, part))
+            continue
+        resolved.append(_resolve_refs_in_fragment(part, resolve_column))
     return ''.join(resolved)
 
 
