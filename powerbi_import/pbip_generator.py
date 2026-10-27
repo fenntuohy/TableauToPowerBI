@@ -1071,6 +1071,53 @@ class PowerBIProjectGenerator:
             if side in padding:
                 general_props[f"padding{side.capitalize()}"] = padding[side]
 
+    @staticmethod
+    def _performance_tower_layout(db, worksheets, page_width):
+        """Return readable full-width visual bounds for the two performance pages."""
+        if db.get('name') not in ('Performance Tower - Overview', 'Performance Tower - v2'):
+            return {}, db.get('size', {}).get('height', 720)
+
+        worksheet_map = {ws.get('name'): ws for ws in worksheets}
+        references = [
+            obj for obj in db.get('objects', [])
+            if obj.get('type') == 'worksheetReference'
+            and obj.get('worksheetName') in worksheet_map
+        ]
+        tables = [
+            obj for obj in references
+            if worksheet_map[obj['worksheetName']].get('chart_type') == 'tableEx'
+        ]
+        charts = [obj for obj in references if obj not in tables]
+        if not tables:
+            return {}, db.get('size', {}).get('height', 720)
+
+        margin = 16
+        gap = 20
+        width = max(page_width - margin * 2, 60)
+        y = 290  # Keep the title and slicer row above the data.
+        positions = {}
+
+        for obj in tables:
+            ws = worksheet_map[obj['worksheetName']]
+            fields = [
+                field for field in ws.get('fields', [])
+                if field.get('shelf') in ('measure_value', 'columns', 'rows')
+            ]
+            height = 270 if len(fields) >= 10 else 190
+            positions[obj['worksheetName']] = {
+                'x': margin, 'y': y, 'w': width, 'h': height,
+            }
+            y += height + gap
+
+        for obj in charts:
+            positions[obj['worksheetName']] = {
+                'x': margin, 'y': y, 'w': width, 'h': 340,
+            }
+            y += 340 + gap
+
+        page_height = y - gap + 24
+        return positions, max(page_height, db.get('size', {}).get('height', 720))
+
     def _find_zone_padding(self, zone, name):
         """Recursively find padding for a named zone in the hierarchy."""
         zone_name = zone.get('name', '') or zone.get('id', '')
@@ -1342,8 +1389,12 @@ class PowerBIProjectGenerator:
         # Prefer the worksheet's extracted title (from Tableau <title><run>)
         # over the raw worksheet name.
         display_title = (ws_data.get('title', '') if ws_data else '') or ws_name
+        title_lines = display_title.splitlines()
+        display_title = title_lines[0].strip()
+        display_subtitle = '\n'.join(line.strip() for line in title_lines[1:]).strip()
         # Resolve parameter references like <[Parameters].[Parameter 1]>
         display_title = self._resolve_parameter_title(display_title, converted_objects)
+        display_subtitle = self._resolve_parameter_title(display_subtitle, converted_objects)
         # Escape single quotes for PBI literal
         display_title = display_title.replace("'", "''")
         title_props = {
@@ -1375,6 +1426,13 @@ class PowerBIProjectGenerator:
         visual_json["visual"]["visualContainerObjects"] = {
             "title": [{"properties": title_props}]
         }
+        if display_subtitle:
+            visual_json["visual"]["visualContainerObjects"]["subTitle"] = [{
+                "properties": {
+                    "show": _L("true"),
+                    "text": _L(json.dumps(display_subtitle))
+                }
+            }]
 
         # Visual objects: encodings (labels, legend, axes, colors)
         visual_objects = self._build_visual_objects(ws_name, ws_data, visual_type)
@@ -2708,7 +2766,13 @@ class PowerBIProjectGenerator:
             # Get the size
             size = db.get('size', {})
             page_width = size.get('width', 1280)
-            page_height = size.get('height', 720)
+            source_page_height = size.get('height', 720)
+            page_height = source_page_height
+            tower_layout, tower_page_height = self._performance_tower_layout(
+                db, worksheets, page_width)
+            if tower_layout:
+                page_height = tower_page_height
+            display_option = 'FitToWidth' if tower_layout else 'FitToPage'
 
             # Store for _make_visual_position clamping
             self._current_page_width = page_width
@@ -2718,7 +2782,7 @@ class PowerBIProjectGenerator:
                 "$schema": SCHEMA_PAGE,
                 "name": page_name,
                 "displayName": page_display_name,
-                "displayOption": "FitToPage",
+                "displayOption": display_option,
                 "height": page_height,
                 "width": page_width
             }
@@ -2801,7 +2865,7 @@ class PowerBIProjectGenerator:
             max_x = max((o.get('position', {}).get('x', 0) + o.get('position', {}).get('w', 0) for o in db_objects), default=page_width)
             max_y = max((o.get('position', {}).get('y', 0) + o.get('position', {}).get('h', 0) for o in db_objects), default=page_height)
             scale_x = min(1.0, page_width / max(max_x, 1))
-            scale_y = min(1.0, page_height / max(max_y, 1))
+            scale_y = min(1.0, source_page_height / max(max_y, 1))
 
             for obj in db_objects:
                 # Resolve position: grid layout map (preferred) or proportional (fallback)
@@ -2812,7 +2876,10 @@ class PowerBIProjectGenerator:
                 grid_pos = None
                 if obj_type not in ('filter_control', 'parameter_control') and layout_map and obj_name:
                     grid_pos = layout_map.get(obj_name)
-                if grid_pos:
+                if obj_type == 'worksheetReference' and obj_name in tower_layout:
+                    eff_obj = dict(obj, position=tower_layout[obj_name])
+                    eff_sx, eff_sy = 1.0, 1.0
+                elif grid_pos:
                     eff_obj = dict(obj, position=grid_pos)
                     eff_sx, eff_sy = 1.0, 1.0
                 else:
@@ -3462,6 +3529,12 @@ class PowerBIProjectGenerator:
             return True
         if hasattr(self, '_bim_measure_names') and clean in self._bim_measure_names:
             return True
+        if hasattr(self, '_field_map') and clean in self._field_map:
+            _, prop = self._field_map[clean]
+            if prop in getattr(self, '_bim_measure_names', set()):
+                return True
+            if prop.strip() in getattr(self, '_bim_measure_names', set()):
+                return True
         # Resolve via field_map and check the resolved name
         if hasattr(self, '_field_map') and clean in self._field_map:
             _, prop = self._field_map[clean]
@@ -3473,7 +3546,11 @@ class PowerBIProjectGenerator:
     
     def _clean_field_name(self, name):
         """Strip all known Tableau derivation prefixes from a field name"""
-        clean = _RE_DERIVATION_PREFIX.sub('', name)
+        # Tableau escapes a literal '%' in field names as '\\%'. Left in
+        # place the name matches no model measure, the field is dropped as
+        # unresolved, and a multi-measure chart degrades to a table.
+        clean = (name or '').replace('\\%', '%')
+        clean = _RE_DERIVATION_PREFIX.sub('', clean)
         clean = _RE_TABLE_CALC_PREFIX.sub('', clean)
         clean = _RE_TYPE_SUFFIX.sub('', clean)
         return clean.strip()
@@ -3502,10 +3579,10 @@ class PowerBIProjectGenerator:
         "multiRowCard":                      ([], ["Values"]),
         "kpi":                               ([], ["Indicator", "TrendAxis"]),
         "clusteredBarChart":                 (["Category", "Series"], ["Y"]),
-        "stackedBarChart":                   (["Category", "Series"], ["Y"]),
+        "barChart":                          (["Category", "Series", "Tooltips"], ["Y"]),
         "hundredPercentStackedBarChart":      (["Category", "Series"], ["Y"]),
         "clusteredColumnChart":              (["Category", "Series"], ["Y"]),
-        "stackedColumnChart":                (["Category", "Series"], ["Y"]),
+        "columnChart":                       (["Category", "Series", "Tooltips"], ["Y"]),
         "hundredPercentStackedColumnChart":   (["Category", "Series"], ["Y"]),
         "lineChart":                         (["Category", "Series"], ["Y"]),
         "areaChart":                         (["Category", "Series"], ["Y"]),
@@ -3646,6 +3723,26 @@ class PowerBIProjectGenerator:
         fields = ws_data.get('fields', [])
         if not fields:
             return None
+        from visual_generator import resolve_visual_type as _resolve_visual_type
+        raw_visual_type = ws_data.get('chart_type')
+        visual_type = _resolve_visual_type(raw_visual_type) if raw_visual_type else 'clusteredBarChart'
+
+        # Tableau sometimes exposes synthetic pane values for multi-axis
+        # sheets. The pane metadata identifies each actual value/axis pair;
+        # use those rather than combining every measure in a shared shelf.
+        pane_values = ws_data.get('mark_panes', [])
+        pane_measure_fields = [
+            pane.get('value_field') for pane in pane_values
+            if pane.get('value_field')
+        ]
+        if visual_type in ('barChart', 'columnChart', 'lineStackedColumnComboChart') and pane_measure_fields:
+            fields = [f for f in fields if f.get('name') != 'Multiple Values']
+            fields.extend({
+                'name': name,
+                'shelf': 'measure_value',
+                'datasource': next((f.get('datasource') for f in ws_data.get('fields', [])
+                                    if f.get('name') == name), ''),
+            } for name in pane_measure_fields if name not in {f.get('name') for f in fields})
 
         # â”€â”€ Clean & de-duplicate field names â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         skip_names = {'Measure Names', 'Measure Values', 'Multiple Values',
@@ -3729,6 +3826,44 @@ class PowerBIProjectGenerator:
                                    **({'_resolved_pair': resolved_pair} if resolved_pair else {}),
                                    **({'_data_category': category} if category else {})})
 
+        # Value mappings in multi-pane worksheets can refer to calculations
+        # whose escaped brackets make the ordinary field-name index lossy.
+        # Resolve the pane's Bar value to its datasource calculation caption.
+        for field in cleaned_fields:
+            if field.get('shelf') != 'measure_value' or field.get('_resolved_pair'):
+                continue
+            # Tableau escapes '%%' as '\\%%' in field names, and a
+            # multi-measure sheet often carries no datasource on the field at
+            # all. Both previously prevented the lookup: the name never
+            # matched a calculation and the datasource guard skipped every
+            # datasource. The measure then failed BIM resolution, the sheet
+            # lost all its values, and a lineChart degraded to a bare table
+            # of dimensions.
+            source_name = (field.get('name', '')
+                           .replace(']]', ']')
+                           .replace('\\%', '%'))
+            field_ds = field.get('datasource')
+            for datasource in getattr(self, '_datasources_ref', []) or []:
+                if field_ds and datasource.get('name') != field_ds:
+                    continue
+                for calculation in datasource.get('calculations', []) or []:
+                    raw_name = (calculation.get('name', '')
+                                .strip('[]').replace(']]', ']')
+                                .replace('\\%', '%'))
+                    if raw_name == source_name:
+                        caption = (calculation.get('caption') or raw_name).replace(']]', ']').strip()
+                        # The measure is not necessarily on tables[0]: a
+                        # datasource can expose several tables and the
+                        # calculations land on the main one. Try every table
+                        # before giving up, or the field stays unresolved and
+                        # the chart degrades to a table of dimensions.
+                        for _tbl in (datasource.get('tables') or []):
+                            _tname = _tbl.get('name')
+                            if _tname and (_tname, caption) in _bim_sym:
+                                field['_resolved_pair'] = (_tname, caption)
+                                break
+                        break
+
         if not cleaned_fields:
             return None
 
@@ -3755,6 +3890,17 @@ class PowerBIProjectGenerator:
         hier_dims = rows_dims + cols_dims + other_dims
         # All axis measures (rows + columns + expanded from :Measure Names)
         axis_meas = rows_meas + cols_meas + expanded_meas + other_meas
+        if visual_type in ('barChart', 'columnChart', 'lineStackedColumnComboChart'):
+            pane_bar = next((pane for pane in ws_data.get('mark_panes', [])
+                             if pane.get('mark_class', '').lower() == 'bar'
+                             and pane.get('value_field')), None)
+            if pane_bar:
+                bar_value = pane_bar['value_field']
+                field = next((item for item in cleaned_fields
+                              if self._clean_field_name(item.get('name', '')) == bar_value), None)
+                if field:
+                    field = {**field, 'shelf': 'measure_value'}
+                    axis_meas = [field]
 
         # Promote text-shelf measures to axis_meas when there are no axis
         # measures yet (e.g. pie/donut charts where the value sits on text
@@ -3781,9 +3927,6 @@ class PowerBIProjectGenerator:
         fallback_dims = axis_dims + color_dims + detail_dims + tooltip_dims
         fallback_meas = axis_meas + size_fields + color_meas + tooltip_meas
 
-        from visual_generator import resolve_visual_type as _rvt
-        _raw_ct = ws_data.get('chart_type')
-        visual_type = _rvt(_raw_ct) if _raw_ct else 'clusteredBarChart'
         query_state = {}
 
         # â”€â”€ Per-visual-type role assignment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -3835,11 +3978,13 @@ class PowerBIProjectGenerator:
 
         elif visual_type in ('tableEx', 'table'):
             # Table: all fields (dims + measures) â†’ Values
-            table_fields = all_dims + all_meas or cleaned_fields
+            table_fields = (axis_dims + color_dims + axis_meas + size_fields
+                            + color_meas + tooltip_meas
+                            or cleaned_fields)
             if table_fields:
                 query_state["Values"] = {
                     "projections": [self._make_projection_entry(f)
-                                    for f in table_fields[:10]]
+                                    for f in table_fields]
                 }
 
         elif visual_type == 'matrix':
@@ -4044,15 +4189,39 @@ class PowerBIProjectGenerator:
 
         elif visual_type in ('lineClusteredColumnComboChart',
                              'lineStackedColumnComboChart'):
+            combo_panes = [pane for pane in ws_data.get('mark_panes', [])
+                           if pane.get('value_field')]
+            bar_pane = next((pane for pane in combo_panes
+                             if pane.get('mark_class', '').lower() == 'bar'), None)
+            line_pane = next((pane for pane in combo_panes
+                              if pane is not bar_pane), None)
+            if bar_pane and line_pane:
+                pane_field = lambda pane: next((field for field in cleaned_fields
+                                                if self._clean_field_name(
+                                                    field.get('name', '')) == pane['value_field']), None)
+                bar_measure = pane_field(bar_pane)
+                line_measure = pane_field(line_pane)
+                if bar_measure:
+                    query_state['Y'] = self._make_projection(bar_measure)
+                if line_measure:
+                    query_state['Y2'] = self._make_projection(line_measure)
+                if visual_type == 'lineStackedColumnComboChart' and not bar_measure:
+                    ws_data['_visual_mapping_note'] = (
+                        'Tableau stacked-column series value was not found in model fields; '
+                        'the combo chart may render without stacked columns.')
+                if visual_type == 'lineStackedColumnComboChart' and not line_measure:
+                    ws_data['_visual_mapping_note'] = (
+                        'Tableau line-overlay value was not found in model fields; '
+                        'the combo chart may render without the line overlay.')
             if axis_dims:
                 query_state["Category"] = self._make_projection(axis_dims[0])
             if color_dims:
                 query_state["Series"] = self._make_projection(color_dims[0])
             elif len(axis_dims) >= 2:
                 query_state["Series"] = self._make_projection(axis_dims[1])
-            if axis_meas:
+            if axis_meas and not (bar_pane and line_pane):
                 query_state["Y"] = self._make_projection(axis_meas[0])
-            if len(axis_meas) >= 2:
+            if len(axis_meas) >= 2 and not (bar_pane and line_pane):
                 query_state["Y2"] = self._make_projection(axis_meas[1])
             if tip_fields:
                 query_state["Tooltips"] = {
@@ -4151,9 +4320,9 @@ class PowerBIProjectGenerator:
         # (e.g. string-split fields that transitively reference SUM()).
         # Prefer tableEx (preserves all data columns).
         _NEEDS_CATEGORY = {
-            'clusteredBarChart', 'stackedBarChart',
+            'clusteredBarChart', 'barChart',
             'hundredPercentStackedBarChart',
-            'clusteredColumnChart', 'stackedColumnChart',
+            'clusteredColumnChart', 'columnChart',
             'hundredPercentStackedColumnChart',
             'lineChart', 'areaChart', 'stackedAreaChart',
             'hundredPercentStackedAreaChart',
@@ -4433,7 +4602,6 @@ class PowerBIProjectGenerator:
         )
         if canonical_prop:
             prop = canonical_prop
-        prop = prop.strip()
 
         shelf_agg = field.get('aggregation', '')
         explicit_agg_func = _TABLEAU_AGG_TO_PBI_FUNC.get(shelf_agg)
