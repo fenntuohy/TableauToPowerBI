@@ -245,6 +245,38 @@ def _rebind_hyper_extracts_to_live_source(datasource):
         missing = cols - live_cols
         if len(missing) > 0 and any(not m.startswith('CALCULATION_') for m in missing):
             continue
+
+        # Consolidate rather than duplicate. Rebinding used to point the
+        # extract at the live table while leaving that table in place, so the
+        # same physical rows were imported twice - for this workbook that was
+        # 2 x 2.5M rows and the direct cause of
+        # "Resource Governance: consumed memory 1331 MB, limit 1331 MB".
+        #
+        # The extract is a superset of the live table (same source, plus any
+        # derived columns), so the live table is redundant: drop it and let the
+        # extract carry the whole projection. Only when the source tables are
+        # provably the same, so a genuinely separate table is never removed.
+        # The extract's own source_table is the .hyper path ('Extract.Extract'),
+        # not the table it was built from, so comparing them never matches.
+        # The datasource caption names the underlying table
+        # ('REP_COLLECTIONS_DEFAULT_MONTHLY_REPORTING (PROD...REPORTING)'),
+        # and the extract mirrors whichever live table shares that datasource.
+        captions = (datasource.get('caption') or '').upper()
+        live_name = (live.get('name') or '').upper()
+        same_source = bool(live_name) and live_name in captions
+
+        if same_source and cols.issuperset(live_cols):
+            # Merge any column the extract lacks, preserving order.
+            have = {c.get('name', '').upper() for c in table.get('columns', [])}
+            for col in live.get('columns', []):
+                if col.get('name', '').upper() not in have:
+                    table.setdefault('columns', []).append(dict(col))
+                    have.add(col.get('name', '').upper())
+            try:
+                tables.remove(live)
+            except ValueError:
+                pass
+
         table['connection_details'] = dict(live_details)
         table['source_table'] = live.get('source_table') or live.get('name', '')
         table['rebound_from_hyper'] = True
@@ -1346,6 +1378,28 @@ def extract_tables_with_columns(datasource_elem, connection_map=None):
             if col_elem.find('.//calculation') is None
             and col_elem.get('user:auto-column', '') != 'sheet_link'
         }
+        # Names Tableau declares as <calculation> fields. These are computed in
+        # Tableau, not returned by the source query, so they must never become
+        # physical columns - doing so yields sourceColumn references the
+        # rowset does not contain ("The '<oii>X</oii>' column does not exist
+        # in the rowset"). Tableau emits a <metadata-record> for them too,
+        # which is how they leaked into the physical list.
+        calculated_names = {
+            _reverse_tableau_bracket_escape(col_elem.get('name', '').strip('[]'))
+            for col_elem in datasource_elem.findall('./column')
+            if col_elem.find('.//calculation') is not None
+        }
+        # Physical columns declared on each <relation><columns>, per parent table.
+        calculated_candidates = {}
+        relation_physical_names = set()
+        for _tbl in raw_tables.values():
+            for _c in _tbl.get('columns', []):
+                relation_physical_names.add(_c.get('name', ''))
+        for _rel in datasource_elem.findall('.//relation'):
+            for _col in _rel.findall('./columns/column'):
+                relation_physical_names.add(
+                    _reverse_tableau_bracket_escape(_col.get('name', '')))
+
         singleton_name = next(iter(raw_tables)) if len(raw_tables) == 1 else None
         metadata_table_cols = {}
         for mr in datasource_elem.findall('.//metadata-record[@class="column"]'):
@@ -1381,6 +1435,7 @@ def extract_tables_with_columns(datasource_elem, connection_map=None):
                 'length': None,
                 'nullable': contains_null == 'true',
             }
+
             if declaration is not None:
                 col['role'] = declaration.get('role') or col['role']
                 col['default_format'] = declaration.get('default-format', '')
