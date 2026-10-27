@@ -1499,3 +1499,15 @@ class TestNormaliseCustomSql(unittest.TestCase):
         self.assertNotIn('>>=', literal)
         self.assertNotIn('#"', literal)
         self.assertTrue(literal.startswith('"') and literal.endswith('"'))
+
+
+class TestEscapedPercentFieldName(unittest.TestCase):
+    """Tableau escapes a literal '%' as '\\%' in field names."""
+
+    def test_escaped_percent_is_stripped(self):
+        # A measure named '% Defaults Actual' arrives as '\\% Defaults Actual'.
+        # Left escaped it matches no model measure and the chart degrades.
+        raw = '\\% Defaults Actual (copy)_3751991090005692424'
+        self.assertTrue(raw.startswith('\\%'))
+        self.assertEqual(raw.replace('\\%', '%'),
+                         '% Defaults Actual (copy)_3751991090005692424')
