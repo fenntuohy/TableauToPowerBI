@@ -63,6 +63,38 @@ def _has_text_quick_calc_table_signature(worksheet):
     )
 
 
+def _has_ordinal_measure_values_signature(worksheet):
+    """An Automatic sheet whose measures are all printed, not plotted.
+
+    Tableau draws a crosstab by putting a dimension on Rows and its measures
+    beside it, separated by ``/``.  Whether those measures are text or marks is
+    decided by the column-instance type: ``ordinal`` prints the value, while
+    ``quantitative`` plots it on an axis.  Both live on the same shelf, so the
+    shelf alone cannot tell a crosstab from a bar chart -- the type can.
+    """
+    if (worksheet.findtext('./table/cols', '') or '').strip():
+        return False
+
+    rows = worksheet.findtext('./table/rows', '') or ''
+    if not rows.strip():
+        return False
+
+    types = {
+        instance.get('name'): instance.get('type')
+        for instance in worksheet.findall('.//column-instance')
+    }
+    plotted = False
+    for field_ref in re.findall(r'\]\.\[([^\]]+)\]', rows):
+        kind = types.get(f'[{field_ref}]')
+        if kind == 'nominal':
+            continue
+        if kind == 'quantitative':
+            plotted = True
+        elif kind != 'ordinal':
+            return False
+    return not plotted
+
+
 def _has_stacked_bar_pane(worksheet):
     """A Bar pane with a color dimension is Tableau's stacked-bar encoding."""
     for pane in worksheet.findall('.//pane'):
@@ -120,7 +152,8 @@ def determine_chart_type(worksheet):
         return 'clusteredBarChart'
 
     if (_has_multiple_values_table_signature(worksheet)
-            or _has_text_quick_calc_table_signature(worksheet)):
+            or _has_text_quick_calc_table_signature(worksheet)
+            or _has_ordinal_measure_values_signature(worksheet)):
         return 'tableEx'
 
     if _has_stacked_bar_pane(worksheet):
