@@ -2352,11 +2352,24 @@ def _build_table(table, connection, calculations, columns_metadata, dax_context=
             dax_formula = _wrap_bare_ref_expression(
                 dax_formula, datatype, result_table.get('name', ''))
 
-            # DAX Measure
+            # DAX Measure. A Tableau calculation carries its display format
+            # on the declaring column; honouring it is what keeps a rate
+            # declared "p0.0%" reading as 5.3% rather than 0.0534.
+            # Datasource column metadata is keyed by the Tableau declaration
+            # name, which keeps its brackets ("[Calculation_1]"); calc_name
+            # is the stripped form.  Try every form the extract uses.
+            calc_meta_for_format = (col_metadata_map.get(caption)
+                                    or col_metadata_map.get(calc_name)
+                                    or col_metadata_map.get(calc.get('name', ''))
+                                    or {})
+            tableau_fmt = (calc_meta_for_format.get('default_format', '')
+                           or calc.get('default_format', ''))
+            measure_format = (_convert_tableau_format_to_pbi(tableau_fmt)
+                              if tableau_fmt else '')
             bim_measure = {
                 "name": caption,
                 "expression": dax_formula,
-                "formatString": _get_format_string(datatype),
+                "formatString": measure_format or _get_format_string(datatype),
                 "displayFolder": _get_display_folder(datatype, role)
             }
             # Propagate description from Tableau (if extracted)
@@ -2552,6 +2565,26 @@ def _get_format_string(datatype):
     return format_map.get(datatype.lower(), '0')
 
 
+#: Tableau prefixes a format's positive section with a category letter --
+#: ``n`` number, ``p`` percentage, ``c`` currency.  Power BI has no equivalent,
+#: and leaving the letter in place yields a format it rejects (``p0.0%``
+#: renders as literal text rather than a percentage).
+_TABLEAU_FORMAT_CATEGORY_PREFIX = re.compile(r'^([npc])(?=[#0$(])', re.IGNORECASE)
+
+
+def _strip_tableau_format_prefixes(fmt):
+    """Drop the per-section category letter Tableau prefixes a format with."""
+    cleaned = []
+    for section in fmt.split(';'):
+        sign = ''
+        body = section
+        if body[:1] in ('-', '+'):
+            sign, body = body[0], body[1:]
+        body = _TABLEAU_FORMAT_CATEGORY_PREFIX.sub('', body, count=1)
+        cleaned.append(sign + body)
+    return ';'.join(cleaned)
+
+
 def _convert_tableau_format_to_pbi(tableau_format):
     """Convert a Tableau number format string to Power BI format string.
 
@@ -2567,7 +2600,7 @@ def _convert_tableau_format_to_pbi(tableau_format):
     if not tableau_format:
         return ''
 
-    fmt = tableau_format.strip()
+    fmt = _strip_tableau_format_prefixes(tableau_format.strip())
 
     # Already a PBI-compatible format
     if fmt in ('0', '#,0', '#,0.00', '0.00%', '$#,0.00', 'General Date', 'Short Date'):
