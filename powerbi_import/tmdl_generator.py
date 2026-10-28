@@ -1084,6 +1084,18 @@ def _create_semantic_tables(model, ctx, datasources, extra_objects=None):
                 caption = metadata.get('caption')
                 if caption:
                     table_metadata[caption] = metadata
+            # Calculations are declared on the datasource, not on the table, so
+            # the loop above never sees them.  They still carry the number
+            # format their measure has to inherit ("p0.0%" -> 0.0%), so fold
+            # the datasource-level declarations in too.
+            for meta in owner.get('columns', []):
+                decl_name = meta.get('name', '').strip('[]')
+                if not decl_name or decl_name in table_metadata:
+                    continue
+                table_metadata[decl_name] = dict(meta)
+                decl_caption = meta.get('caption')
+                if decl_caption and decl_caption not in table_metadata:
+                    table_metadata[decl_caption] = table_metadata[decl_name]
         # An explicit table attribution wins: a merged model records which
         # table each calculation came from, and datasource routing alone would
         # send them all to the widest table in the merged datasource.
