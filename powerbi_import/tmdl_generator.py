@@ -535,6 +535,13 @@ def _build_semantic_model(datasources, report_name="Report", extra_objects=None,
                                 ctx['column_table_map'], datasources,
                                 ctx.get('dax_context', {}))
 
+    # Enrichment generates measures too (quick table calcs such as
+    # "% of Total <field>").  Those are built from the Tableau field name, so
+    # they need the same retarget as the converted DAX above -- otherwise they
+    # address a column the model no longer carries and the self-healer papers
+    # over the breakage with a hidden BLANK() placeholder.
+    retarget_dax_column_refs(model)
+
     # Phase 13: Composite model post-processing
     if (model_mode or 'import') == 'composite':
         _enforce_hybrid_relationship_constraints(model)
