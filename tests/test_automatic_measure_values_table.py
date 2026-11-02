@@ -73,5 +73,53 @@ class TestMeasureValuesOnOneShelfIsACrosstab(unittest.TestCase):
         self.assertEqual(_chart_type(xml), 'tableEx')
 
 
+#: "Default Rec. - Graph" in the Lease Defaults workbook: an explicit Bar
+#: mark that also carries a ``Multiple Values`` text encoding (the label on
+#: each bar).  The crosstab guard matched the text encoding and demoted a
+#: real bar chart to ``tableEx``.
+EXPLICIT_BAR_WITH_TEXT_ENCODING = '''<worksheet><table>
+  <view><datasource-dependencies datasource="ds">
+    <column name="[STATUS_ENTRY_MONTH]" datatype="date"/>
+    <column name="[ORDER_NUMBER]" datatype="string"/>
+    <column name="[CATEGORISATION]" datatype="string"/>
+    <column-instance name="[none:STATUS_ENTRY_MONTH:qk]" column="[STATUS_ENTRY_MONTH]" type="quantitative"/>
+    <column-instance name="[none:ORDER_NUMBER:nk]" column="[ORDER_NUMBER]" type="nominal"/>
+    <column-instance name="[none:CATEGORISATION:nk]" column="[CATEGORISATION]" type="nominal"/>
+  </datasource-dependencies></view>
+  <rows>[ds].[none:ORDER_NUMBER:nk]</rows>
+  <cols>[ds].[none:STATUS_ENTRY_MONTH:qk]</cols>
+  <panes><pane><mark class="Bar"/>
+    <encodings>
+      <color column="[ds].[none:CATEGORISATION:nk]"/>
+      <text column="[ds].[Multiple Values]"/>
+    </encodings>
+  </pane></panes>
+</table></worksheet>'''
+
+
+class TestExplicitMarkOutranksCrosstabGuards(unittest.TestCase):
+    """A non-Automatic mark is Tableau's own statement of the chart family.
+
+    The ``Multiple Values`` text encoding also appears on bar charts (it is
+    the label), and ``_has_ordinal_measure_values_signature`` fires whenever
+    a measure is printed rather than plotted.  Running those Automatic-only
+    guards before the explicit-mark branch turned real bar charts into
+    crosstabs.
+    """
+
+    def test_explicit_bar_with_multiple_values_encoding_is_not_a_table(self):
+        self.assertNotEqual(_chart_type(EXPLICIT_BAR_WITH_TEXT_ENCODING), 'tableEx')
+
+    def test_explicit_bar_keeps_its_bar_family(self):
+        # The crosstab guard no longer fires; the dimension sits on Rows, so
+        # this stays a horizontal bar chart rather than becoming a table.
+        self.assertEqual(_chart_type(EXPLICIT_BAR_WITH_TEXT_ENCODING), 'barChart')
+
+    def test_automatic_with_multiple_values_encoding_is_still_a_crosstab(self):
+        xml = EXPLICIT_BAR_WITH_TEXT_ENCODING.replace(
+            '<mark class="Bar"/>', '<mark class="Automatic"/>')
+        self.assertEqual(_chart_type(xml), 'tableEx')
+
+
 if __name__ == '__main__':
     unittest.main()

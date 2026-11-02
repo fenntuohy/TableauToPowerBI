@@ -258,6 +258,11 @@ def generate_tmdl(datasources, report_name, extra_objects, output_dir,
     recovery = RecoveryReport(report_name)
     repair_count = _self_heal_model(model, recovery=recovery)
 
+    _create_measure_rows_table(
+        model, extra_objects.get('_worksheets', extra_objects.get('worksheets', [])),
+        datasources, model.get('_main_table_name'),
+        model.get('_quick_table_calc_measures', {}))
+
     # Step 1b2: Incremental refresh detection & wiring (Sprint 120)
     ir_result = None
     if incremental_refresh:
@@ -451,6 +456,7 @@ def generate_tmdl(datasources, report_name, extra_objects, output_dir,
         'measure_rename_map': model.get('_measure_rename_map', {}),
         'column_rename_map': model.get('_column_rename_map', {}),
         'quick_table_calc_measures': quick_table_calc_measures,
+        'measure_rows_config': model.get('_measure_rows_config'),
     }
     if ir_result:
         stats['incremental_refresh'] = ir_result
@@ -550,8 +556,231 @@ def _build_semantic_model(datasources, report_name="Report", extra_objects=None,
 
     # Attach table rename map for PBIP report generator
     model['_table_rename_map'] = ctx.get('table_rename_map', {})
-
+    model['_main_table_name'] = ctx['main_table_name']
     return model
+
+
+_MEASURE_NAME_CROSSTABS = {
+    '3PL Perfornance - On Time',
+    'PDD adjusted Target',
+    'UZBs/AV',
+}
+_MEASURE_ROWS_TABLE = 'Tableau Measure Rows'
+_MEASURE_ROWS_VALUE = 'Tableau Measure Rows Value'
+
+
+def _measure_name(value):
+    """Normalize Tableau's escaped/bracketed identifiers for matching."""
+    return re.sub(r'[\[\]\s]+', '', str(value or '').replace(']]', ']')).casefold()
+
+
+def _create_measure_rows_table(model, worksheets, datasources, main_table_name,
+                               quick_calcs=None):
+    """Materialize Tableau Measure Names and reproduce AVG date totals."""
+    source_sheets = [
+        ws for ws in worksheets or []
+        if ws.get('name') in _MEASURE_NAME_CROSSTABS
+        and any(field.get('name') in (':Measure Names', 'Measure Names')
+                and field.get('shelf') == 'rows'
+                for field in ws.get('fields', []))
+    ]
+    if not source_sheets:
+        return
+
+    tables = model.get('model', {}).get('tables', [])
+    fact = next((table for table in tables
+                 if table.get('name') == main_table_name), None)
+    if not fact:
+        return
+
+    measure_owners = {
+        _measure_name(measure.get('name')): (table.get('name'), measure.get('name'), measure)
+        for table in tables
+        for measure in table.get('measures', [])
+        if measure.get('name')
+    }
+    calculations = {}
+    calculation_details = {}
+    for datasource in datasources or []:
+        for calculation in datasource.get('calculations', []):
+            raw_name = calculation.get('name', '').strip('[]')
+            caption = calculation.get('caption', '')
+            if raw_name and caption:
+                calculations[_measure_name(raw_name)] = caption
+                calculations[_measure_name(caption)] = caption
+                calculation_details[_measure_name(raw_name)] = calculation
+                calculation_details[_measure_name(caption)] = calculation
+
+    column_owners = {
+        _measure_name(column.get('name')): table.get('name')
+        for table in tables
+        for column in table.get('columns', [])
+        if column.get('name')
+    }
+
+    worksheet_period_columns = {}
+    worksheet_total_aggregations = {}
+    for worksheet in source_sheets:
+        period_column = None
+        for field in worksheet.get('fields', []):
+            if field.get('shelf') != 'columns':
+                continue
+            raw_name = field.get('name', '')
+            caption = calculations.get(_measure_name(raw_name), raw_name)
+            match = next((
+                (column_owners.get(_measure_name(candidate)), candidate)
+                for candidate in (caption, raw_name)
+                if column_owners.get(_measure_name(candidate))
+            ), None)
+            if match:
+                period_column = match
+                break
+        if period_column:
+            worksheet_period_columns[worksheet['name']] = period_column
+            worksheet_total_aggregations[worksheet['name']] = str(
+                worksheet.get('formatting', {}).get('header', {}).get('total-label', '')
+            ).strip().upper() or 'AVG'
+    quick_calcs = quick_calcs or model.get('_quick_table_calc_measures', {})
+    rows = []
+    seen = set()
+
+    for worksheet in source_sheets:
+        for field in worksheet.get('fields', []):
+            if field.get('shelf') != 'measure_value':
+                continue
+            field_name = field.get('name', '')
+            datasource = field.get('datasource', '')
+            quick_calc = quick_calcs.get(f'{datasource}\x1f{field_name}')
+            caption = calculations.get(_measure_name(field_name), '')
+            if quick_calc:
+                target_table, target_name = quick_calc
+                target_measure = next((
+                    item for table in tables if table.get('name') == target_table
+                    for item in table.get('measures', [])
+                    if item.get('name') == target_name
+                ), None)
+            else:
+                target = (measure_owners.get(_measure_name(caption))
+                          or measure_owners.get(_measure_name(field_name)))
+                if not target:
+                    continue
+                target_table, target_name, target_measure = target
+            if not target_table or not target_name or not target_measure:
+                continue
+            period_column = worksheet_period_columns.get(worksheet['name'])
+            if not period_column:
+                continue
+            key = (worksheet['name'], target_name)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            label = caption.strip() or target_name.strip()
+            format_string = ''
+            field_formats = worksheet.get('formatting', {}).get('field_formats', {})
+            normalized_field = _measure_name(field_name)
+            for format_field, tableau_format in field_formats.items():
+                if normalized_field and normalized_field in _measure_name(format_field):
+                    format_string = _convert_tableau_format_to_pbi(tableau_format)
+                    break
+            if format_string in ('N', 'n'):
+                format_string = '#,0'
+            elif format_string.startswith('p') and format_string.endswith('%'):
+                decimals = format_string[1:-1].split('.')[-1] if '.' in format_string else ''
+                format_string = '0' + ('.' + decimals if decimals else '') + '%'
+            format_string = format_string or target_measure.get('formatString', '')
+            row_key = str(len(rows))
+            rows.append((worksheet['name'], label, row_key, target_table,
+                         target_name, period_column[0], period_column[1],
+                         format_string,
+                         worksheet_total_aggregations.get(worksheet['name'], '')))
+
+    if not rows:
+        return
+
+    def m_string(value):
+        return '"' + value.replace('"', '""') + '"'
+
+    m_rows = ', '.join('{' + ', '.join(m_string(value) for value in row[:3]) + '}'
+                       for row in rows)
+    measure_rows_table = {
+        'name': _MEASURE_ROWS_TABLE,
+        'columns': [
+            {'name': name, 'dataType': 'string', 'sourceColumn': name,
+             'summarizeBy': 'none', 'isHidden': name in ('Worksheet', 'MeasureKey')}
+            for name in ('Worksheet', 'Measure', 'MeasureKey')
+        ],
+        'measures': [],
+        'partitions': [{
+            'name': _MEASURE_ROWS_TABLE,
+            'mode': 'import',
+            'source': {'type': 'm', 'expression': (
+                'let\n'
+                '    Source = #table(type table [Worksheet = text, Measure = text, '
+                f'MeasureKey = text], {{{m_rows}}})\n'
+                'in\n'
+                '    Source'
+            )},
+        }],
+    }
+    model['model']['tables'].append(measure_rows_table)
+
+    period_table, period_column = rows[0][5:7]
+    key_ref = f"'{_MEASURE_ROWS_TABLE}'[MeasureKey]"
+    value_cases = []
+    for _, _, row_key, target_table, target_name, _, _, _fmt, _ in rows:
+        target_measure = next((
+            measure for table in tables if table.get('name') == target_table
+            for measure in table.get('measures', [])
+            if measure.get('name') == target_name
+        ), None)
+        expression = (target_measure or {}).get('expression', '')
+        if expression:
+            value_cases.extend((f'"{row_key}"', f'({expression})'))
+    if not value_cases:
+        return
+
+    period_ref = f"'{period_table.replace(chr(39), chr(39) * 2)}'[{period_column}]"
+    total_cases = []
+    for row in rows:
+        total_cases.extend((f'"{row[2]}"', f'"{row[8]}"'))
+    aggregation_selection = f'SWITCH(SELECTEDVALUE({key_ref}), {", ".join(total_cases)})'
+    fact.setdefault('measures', []).append({
+        'name': _MEASURE_ROWS_VALUE,
+        'expression': (
+            f'VAR _key = SELECTEDVALUE({key_ref}) '
+            f'VAR _cell = SWITCH(SELECTEDVALUE({key_ref}), {", ".join(value_cases)}) '
+            f'VAR _aggregation = {aggregation_selection} '
+            f'VAR _total = IF(_aggregation = "AVG", '
+            f'AVERAGEX(VALUES({period_ref}), CALCULATE('
+            f'SWITCH(SELECTEDVALUE({key_ref}), {", ".join(value_cases)}))), '
+            f'SUMX(VALUES({period_ref}), CALCULATE('
+            f'SWITCH(SELECTEDVALUE({key_ref}), {", ".join(value_cases)})))) '
+            f'RETURN IF(ISINSCOPE({period_ref}), _cell, _total)'
+        ),
+        'displayFolder': 'Tableau Matrix Values',
+        'description': 'Returns the average of weekly measure values in Matrix totals.',
+    })
+
+    model['_measure_rows_config'] = {
+        'table': _MEASURE_ROWS_TABLE,
+        'worksheet_column': 'Worksheet',
+        'label_column': 'Measure',
+        'key_column': 'MeasureKey',
+        'value_measure': _MEASURE_ROWS_VALUE,
+        'worksheets': {
+            worksheet: [
+                {'label': label, 'key': row_key,
+                 'measure': {'table': target_table, 'name': target_name,
+                             'aggregation': 'avg', 'formatString': fmt,
+                             'total': total_aggregation}}
+                for row_sheet, label, row_key, target_table, target_name,
+                period_table, period_column, fmt, total_aggregation in rows
+                if row_sheet == worksheet
+            ]
+            for worksheet in {row[0] for row in rows}
+        },
+    }
 
 
 
@@ -563,6 +792,7 @@ from powerbi_import.tmdl_relationships import (  # noqa: E402
     _deactivate_ambiguous_paths,
     _detect_join_graph_issues,
     _detect_many_to_many,
+    _deactivate_ambiguous_many_to_many_paths,
     _enforce_hybrid_relationship_constraints,
     _fix_relationship_type_mismatches,
     _infer_cross_table_relationships,
@@ -1250,6 +1480,10 @@ def _apply_semantic_enrichments(model, extra_objects, main_table_name,
     # Phase 10b: Detect cardinality (runs AFTER Phase 10 so inferred rels are included)
     _detect_many_to_many(model, datasources)
 
+    # Phase 10b: Deactivate m2m relationships that would create two filter
+    # paths to the same dimension (ambiguous paths block refresh).
+    _deactivate_ambiguous_many_to_many_paths(model)
+
     # Phase 10c: Replace RELATED() with LOOKUPVALUE() for manyToMany
     _fix_related_for_many_to_many(model)
 
@@ -1276,8 +1510,16 @@ def _apply_semantic_enrichments(model, extra_objects, main_table_name,
                 print(f"  ⚕ Self-heal: Dropped duplicate measure '{mname}' in '{tname}'")
                 continue
             if key in global_measure_names:
-                # Cross-table case collision → namespace to keep both
-                new_name = f"{mname} ({tname})"
+                # Cross-table case collision → namespace to keep both.
+                # When the colliding table and measure share a name (a Tableau
+                # date parameter emits a table *and* a SELECTEDVALUE measure
+                # both called "Current Period"), the table-name suffix would
+                # produce the degenerate "Current Period (Current Period)".
+                # Use a role suffix in that case instead.
+                if tname.casefold() == key:
+                    new_name = f"{mname} (Parameter)"
+                else:
+                    new_name = f"{mname} ({tname})"
                 nkey = new_name.casefold()
                 suffix = 2
                 while nkey in global_measure_names or nkey in seen_in_table:
@@ -2224,6 +2466,139 @@ def _build_table(table, connection, calculations, columns_metadata, dax_context=
         if has_security_func:
             is_calc_col = False
 
+        # Date-dispatcher calculated columns: a CASE/IF whose parameter picks
+        # BETWEEN physical date columns of this same table (e.g. Tableau's
+        # "Status Entry Month" choosing STATUS_SPV_CATEGORY_DEFAULT_ENTRY_MONTH
+        # / STATUS_180_DPD / STATUS_120_DPD).  The parameter branch must stay
+        # a measure (parameters need filter context), but a static twin column
+        # must also exist so date quick-filters (my:/tmn: zones) can bind to it
+        # as a slicer.  Without the column the slicer silently disappears.
+        if (uses_parameter and not is_literal and not has_aggregation
+                and re.search(r'^(CASE|IF)\b', formula, re.IGNORECASE)):
+            _branch_cols = re.findall(
+                r'\[([A-Za-z0-9_ %]+)\]', formula)
+            _param_pat = re.compile(r'\[Parameters\]\.\[', re.IGNORECASE)
+            _branch_cols = [c for c in _branch_cols
+                            if not _param_pat.search(f'[{c}]')]
+            _branch_cols = [c for c in _branch_cols
+                            if c not in calc_map_ctx and c not in calc_map_ctx.values()]
+            _branch_cols = [c for c in _branch_cols
+                            if c in column_table_map
+                            and column_table_map.get(c) == table_name]
+            _same_date_cols = []
+            _col_meta = (col_metadata_map or {})
+            for c in _branch_cols:
+                dt = (_col_meta.get(c, {}).get('datatype', '') or '').lower()
+                if dt in ('date', 'datetime'):
+                    _same_date_cols.append(c)
+            if _same_date_cols:
+                # Build the static column expression. The parameter reference
+                # must be inlined to its DEFAULT value BEFORE conversion — a
+                # calculated column cannot reference a What-If measure
+                # (SELECTEDVALUE needs filter context), and M cannot express
+                # a measure either. Substituting the saved Tableau default
+                # (e.g. "SPV Category") makes SWITCH pick one physical branch,
+                # which is exactly the workbook's saved filter state.
+                _static_formula = formula
+                # Map [Parameters].[Parameter N] → its own default literal.
+                # Never substitute by dict order — each param id must get its
+                # own value (a date param inline as #date(...) into a string
+                # comparison silently corrupts the expression).
+                def _sub_param_default(m):
+                    _pid = m.group(1).replace(']]', ']').replace('[', '')
+                    _cap = dax_context.get('param_map', {}).get(_pid, _pid)
+                    return (param_values or {}).get(_cap, m.group(0))
+                _static_formula = re.sub(
+                    r'\[Parameters\]\.\[((?:[^\]]|\]\])*)\]',
+                    _sub_param_default, _static_formula)
+                _static_expr = convert_tableau_formula_to_dax(
+                    _static_formula,
+                    column_name=calc_name,
+                    table_name=table_name,
+                    calc_map=dax_context.get('calc_map'),
+                    param_map=dax_context.get('param_map'),
+                    column_table_map=column_table_map,
+                    measure_names=dax_context.get('measure_names'),
+                    is_calc_column=True,
+                    param_values=param_values,
+                    calc_datatype=datatype,
+                    table_columns=_this_table_columns,
+                    ref_alias_map=dax_context.get('ref_alias_map'))
+                # Guard: a twin may NOT reference measures (row context).
+                _twin_has_measure_ref = bool(re.search(
+                    r'\[(?:(?!\]\]).)*\]', _static_expr))
+                if _twin_has_measure_ref:
+                    _twin_names = set(dax_context.get('measure_names') or set())
+                    _twin_refs = set(re.findall(r'\[([^\]]+)\]', _static_expr))
+                    if _twin_refs & _twin_names:
+                        continue
+                # Route the twin through the M-pipeline exactly like a normal
+                # calculated column: _dax_to_m_expression + dependency check.
+                # If M cannot express it, keep it as a DAX calculated column —
+                # either way the column exists for slicers to bind.
+                _twin_m_expr = _dax_to_m_expression(_static_expr, table_name)
+                _twin_m_expr = rename_m_column_refs(_twin_m_expr, rename_map)
+                if _twin_m_expr is not None:
+                    m_available_cols = {rename_map.get(_c, _c)
+                                        for _c in _this_table_columns}
+                    for step_name, _ in m_calc_steps:
+                        sm = re.match(r'#"Added (.+?)"', step_name)
+                        if sm:
+                            m_available_cols.add(sm.group(1))
+                    for ref in re.findall(r'\[#?"?([^\]"]+)"?\]', _twin_m_expr):
+                        if ref in dax_only_calc_cols:
+                            _twin_m_expr = None
+                            break
+                        if ref not in m_available_cols:
+                            _twin_m_expr = None
+                            break
+                _static_col = {
+                    "name": caption,
+                    # 'dateTime' (not 'DateTime') so _auto_date_hierarchies'
+                    # DATE_TYPES check recognizes the twin and builds
+                    # Year/Quarter/Month/Day over it.
+                    "dataType": "dateTime",
+                    "sourceColumn": caption,
+                    "summarizeBy": "none",
+                }
+                if _twin_m_expr is not None:
+                    m_type = _DAX_TO_M_TYPE.get(
+                        map_tableau_to_powerbi_type(datatype), 'type text')
+                    if m_type in ('Int64.Type', 'type number'):
+                        _twin_m_expr = _wrap_date_subtraction_in_duration_days(
+                            _twin_m_expr, columns, col_metadata_map)
+                    new_step = m_transform_add_column(
+                        caption, f'each {_twin_m_expr}', m_type)
+                    existing_m_idx = None
+                    for mi, (sn, _) in enumerate(m_calc_steps):
+                        sm2 = re.match(r'#"Added (.+?)"', sn)
+                        if sm2 and sm2.group(1).lower() == caption.lower():
+                            existing_m_idx = mi
+                            break
+                    if existing_m_idx is not None:
+                        m_calc_steps[existing_m_idx] = new_step
+                    else:
+                        m_calc_steps.append(new_step)
+                else:
+                    _static_col["expression"] = _static_expr
+                    _static_col["isCalculated"] = True
+                    _static_col.pop("sourceColumn", None)
+                _static_col["formatString"] = _get_format_string('date')
+                _static_col["displayFolder"] = _get_display_folder('date', role)
+                _static_col["annotations"] = [
+                    {"name": "MigrationNote",
+                     "value": ("Static twin of measure '" + caption +
+                               "': parameter-dispatched date column so "
+                               "date slicers can bind to it (Tableau "
+                               "quick-filter equivalent).")}
+                ]
+                if not any(c.get("name", "") == caption
+                           for c in result_table.get("columns", [])):
+                    result_table["columns"].append(_static_col)
+                    prelim_calc_col_captions.add(caption)
+                    prelim_calc_col_raws.add(calc_name)
+                # The dynamic measure is still emitted below (parameter-driven).
+
         # Ignore MAKEPOINT (no DAX equivalent)
         if re.search(r'\bMAKEPOINT\b', formula, re.IGNORECASE):
             continue
@@ -2373,6 +2748,8 @@ def _build_table(table, connection, calculations, columns_metadata, dax_context=
             calc_meta_for_format = (col_metadata_map.get(caption)
                                     or col_metadata_map.get(calc_name)
                                     or col_metadata_map.get(calc.get('name', ''))
+                                    or col_metadata_map.get(
+                                        calc.get('name', '').strip('[]'))
                                     or {})
             tableau_fmt = (calc_meta_for_format.get('default_format', '')
                            or calc.get('default_format', ''))
@@ -2578,16 +2955,17 @@ def _get_format_string(datatype):
 
 
 #: Tableau prefixes a format's positive section with a category letter --
-#: ``n`` number, ``p`` percentage, ``c`` currency.  Power BI has no equivalent,
-#: and leaving the letter in place yields a format it rejects (``p0.0%``
-#: renders as literal text rather than a percentage).
+#: ``n`` number, ``p`` percentage, ``c`` currency, ``l`` locale.  Power BI has
+#: no equivalent, and leaving the letter in place yields a format it rejects
+#: (``p0.0%`` renders as literal text, not a percentage).
 _TABLEAU_FORMAT_CATEGORY_PREFIX = re.compile(r'^([npc])(?=[#0$(])', re.IGNORECASE)
 
 
 def _strip_tableau_format_prefixes(fmt):
     """Drop the per-section category letter Tableau prefixes a format with."""
+    sections = fmt.split(';')
     cleaned = []
-    for section in fmt.split(';'):
+    for section in sections:
         sign = ''
         body = section
         if body[:1] in ('-', '+'):

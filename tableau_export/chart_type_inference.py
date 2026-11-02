@@ -9,7 +9,7 @@ Owned by **@extractor**.
 
 import re
 
-from extract_primitives import _clean_field_ref, _MARK_ENCODINGS
+from extract_primitives import _clean_field_ref, _MARK_ENCODINGS, extract_bracketed_groups
 
 
 #: Marks that draw their value as text, so an empty Rows/Columns pair means a
@@ -44,11 +44,38 @@ def extract_mark_classes(worksheet):
     return marks
 
 
+def extract_mark_panes(worksheet):
+    """Keep pane-level mark and axis evidence for multi-pane worksheets."""
+    panes = []
+    for pane in worksheet.findall('.//pane'):
+        mark = pane.find('./mark')
+        mark_class = mark.get('class', '') if mark is not None else ''
+        axis_ref = pane.get('y-axis-name', '')
+        groups = extract_bracketed_groups(axis_ref)
+        value_field = _clean_field_ref(groups[1]) if len(groups) > 1 else ''
+        encodings = pane.find('./encodings')
+        color_ref = ''
+        if encodings is not None:
+            color = encodings.find('./color')
+            if color is not None:
+                color_groups = extract_bracketed_groups(color.get('column', ''))
+                if len(color_groups) > 1:
+                    color_ref = _clean_field_ref(color_groups[1])
+        panes.append({
+            'mark_class': mark_class,
+            'value_field': value_field,
+            'color_field': color_ref,
+        })
+    return panes
+
+
 def _has_multiple_values_table_signature(worksheet):
-    """Tableau crosstabs use the virtual Measure Names/Multiple Values pair."""
-    rows = worksheet.findtext('./table/rows', '') or ''
+    """Tableau crosstabs expose Measures as text alongside row/column shelves."""
+    shelves = ' '.join((worksheet.findtext(f'./table/{shelf}', '') or '')
+                       for shelf in ('rows', 'cols'))
     text_columns = [elem.get('column', '') for elem in worksheet.findall('.//encodings/text')]
-    return (':Measure Names' in rows and any('Multiple Values' in col for col in text_columns))
+    has_multiple_values = any('Multiple Values' in col for col in text_columns)
+    return bool(shelves.strip() and has_multiple_values)
 
 
 def _has_text_quick_calc_table_signature(worksheet):
@@ -106,6 +133,26 @@ def _has_stacked_bar_pane(worksheet):
             return True
     return False
 
+
+def _has_stacked_bar_line_overlay(worksheet):
+    """Detect a Tableau stacked Bar pane and a separate measure pane."""
+    panes = worksheet.findall('.//pane')
+    bar_panes = [
+        pane for pane in panes
+        if (pane.find('./mark') is not None
+            and (pane.find('./mark').get('class') or '').lower() == 'bar'
+            and pane.get('y-axis-name'))
+    ]
+    if not bar_panes:
+        return False
+    return any(
+        pane.find('./mark') is not None
+        and (pane.find('./mark').get('class') or '').lower() == 'automatic'
+        and pane.get('y-axis-name')
+        and pane.get('y-axis-name') != bar_panes[0].get('y-axis-name')
+        for pane in panes
+    )
+
 def determine_chart_type(worksheet):
     """Determines the chart type from the Tableau mark type.
 
@@ -151,13 +198,22 @@ def determine_chart_type(worksheet):
             return 'map'
         return 'clusteredBarChart'
 
-    if (_has_multiple_values_table_signature(worksheet)
-            or _has_text_quick_calc_table_signature(worksheet)
-            or _has_ordinal_measure_values_signature(worksheet)):
+    # An explicit, non-Automatic mark outranks the Automatic-only crosstab
+    # heuristics below.  Tableau's ``Multiple Values`` text encoding also
+    # appears on a Bar sheet that carries a label encoding, so running those
+    # guards first demoted a genuine bar chart to a crosstab.
+    _explicit_mark = mark_class.lower() != 'automatic'
+
+    if not _explicit_mark and (_has_multiple_values_table_signature(worksheet)
+                               or _has_text_quick_calc_table_signature(worksheet)
+                               or _has_ordinal_measure_values_signature(worksheet)):
         return 'tableEx'
 
+    if _has_stacked_bar_line_overlay(worksheet):
+        return 'lineStackedColumnComboChart'
+
     if _has_stacked_bar_pane(worksheet):
-        return 'stackedBarChart'
+        return _detect_bar_orientation(worksheet, 'barChart')
 
     card_type = _shelfless_marks_card_type(worksheet, mark_class)
     if card_type:
@@ -171,17 +227,17 @@ def determine_chart_type(worksheet):
         return 'map'
 
     # A Tableau worksheet can have several panes with different marks. A Bar
-    # pane split by a categorical color encoding is a stacked bar, even when
-    # the first pane is Automatic.
+    # pane split by a categorical color encoding is stacked, even when the
+    # first pane is Automatic.
     mark_classes = extract_mark_classes(worksheet)
     if ('Bar' in mark_classes and worksheet.find('.//encodings/color') is not None):
-        return 'stackedBarChart'
+        return _detect_bar_orientation(worksheet, 'barChart')
 
     # For explicit mark types, use the mapping directly
     if mark_class.lower() != 'automatic':
         pbi_type = _map_tableau_mark_to_type(mark_class)
         # Bar orientation: dimension on cols + measure on rows = vertical column chart
-        if pbi_type == 'clusteredBarChart':
+        if pbi_type in ('clusteredBarChart', 'barChart'):
             pbi_type = _detect_bar_orientation(worksheet, pbi_type)
         return pbi_type
 
@@ -257,9 +313,11 @@ def _detect_bar_orientation(worksheet, default):
 
     # Sprint 78: Map stacked variants based on orientation
     stacked_map_column = {
-        'stackedBarChart': 'stackedColumnChart',
+        'barChart': 'columnChart',
+        'columnChart': 'columnChart',
         'hundredPercentStackedBarChart': 'hundredPercentStackedColumnChart',
         'clusteredBarChart': 'clusteredColumnChart',
+        'columnChart': 'columnChart',
     }
 
     # Dimension on cols + measure on rows → vertical (column)
@@ -371,7 +429,7 @@ def _map_tableau_mark_to_type(mark_class):
         # ── Standard mark classes ──────────────────────────────
         'Automatic': 'clusteredBarChart',  # fallback; usually handled by _infer_automatic_chart_type
         'Bar': 'clusteredBarChart',
-        'Stacked Bar': 'stackedBarChart',
+        'Stacked Bar': 'barChart',
         'Line': 'lineChart',
         'Area': 'areaChart',
         'Square': 'treemap',

@@ -484,6 +484,7 @@ class PowerBIProjectGenerator:
                 report_dir = self.create_report_structure(
                     project_dir, report_name, converted_objects,
                     quick_table_calc_measures=getattr(self, '_quick_table_calc_measure_map', {}),
+                    measure_rows_config=getattr(self, '_measure_rows_config', {}),
                 )
             print(f"  âœ“ Report created: {report_dir}")
         elif not has_visuals:
@@ -814,6 +815,7 @@ class PowerBIProjectGenerator:
             self._actual_bim_measure_types = stats.get('actual_bim_measure_types', {})
             self._measure_rename_map = stats.get('measure_rename_map', {})
             self._quick_table_calc_measure_map = stats.get('quick_table_calc_measures', {})
+            self._measure_rows_config = stats.get('measure_rows_config') or {}
 
             # Store table rename map for multi-datasource entity resolution.
             # When multiple datasources share the same table name, the TMDL
@@ -874,6 +876,52 @@ class PowerBIProjectGenerator:
     MIN_VISUAL_WIDTH = 60
     MIN_VISUAL_HEIGHT = 40
     MIN_GAP = 4  # pixels between adjacent visuals
+    _PERFORMANCE_TOWER_CROSSTABS = {
+        '3PL Perfornance - On Time',
+        '3PL Perfornance - Push Performance',
+        'PDD adjusted Target',
+        'UZBs/AV',
+    }
+
+    def _is_performance_tower_crosstab(self, worksheet):
+        """Use a Matrix for these Tableau crosstabs to preserve column shelves."""
+        if not worksheet or worksheet.get('name') not in self._PERFORMANCE_TOWER_CROSSTABS:
+            return False
+        if worksheet.get('chart_type') not in ('tableEx', 'pivotTable'):
+            return False
+        fields = worksheet.get('fields', [])
+        has_date_columns = False
+        column_types = getattr(self, '_actual_bim_column_types', {}) or {}
+        field_map = getattr(self, '_field_map', {}) or {}
+        for field in fields:
+            if field.get('shelf') != 'columns':
+                continue
+            name = self._clean_field_name(field.get('name', ''))
+            pair = field.get('_resolved_pair') or field_map.get(name)
+            dtype = column_types.get(pair, '').lower() if pair else ''
+            if (self._is_date_field(name)
+                    or (pair and self._is_date_field(pair[1]))
+                    or dtype in ('date', 'datetime', 'datetime2', 'datetimezone')):
+                has_date_columns = True
+                break
+        has_measure_values = any(
+            field.get('shelf') == 'measure_value'
+            or (field.get('shelf') == 'text'
+                and (field.get('table_calc')
+                     or self._is_measure_field(
+                         self._clean_field_name(field.get('name', '')))))
+            for field in fields
+        )
+        has_measure_names_rows = any(
+            field.get('shelf') == 'rows'
+            and field.get('name') in (':Measure Names', 'Measure Names')
+            for field in fields
+        ) and any(field.get('shelf') == 'measure_value' for field in fields)
+        has_configured_measure_rows = bool(
+            (getattr(self, '_measure_rows_config', {}) or {})
+            .get('worksheets', {}).get(worksheet.get('name'))
+        ) and has_measure_names_rows
+        return has_date_columns and (has_measure_values or has_configured_measure_rows)
 
     def _make_visual_position(self, pos, scale_x, scale_y, z_index,
                                page_width=None, page_height=None):
@@ -1085,7 +1133,8 @@ class PowerBIProjectGenerator:
         ]
         tables = [
             obj for obj in references
-            if worksheet_map[obj['worksheetName']].get('chart_type') == 'tableEx'
+            if worksheet_map[obj['worksheetName']].get('chart_type') in
+            ('tableEx', 'pivotTable')
         ]
         charts = [obj for obj in references if obj not in tables]
         if not tables:
@@ -1142,6 +1191,8 @@ class PowerBIProjectGenerator:
 
         pos = obj.get('position', {})
         ws_name = obj.get('worksheetName', '')
+        measure_rows_config = getattr(self, '_measure_rows_config', {}) or {}
+        measure_rows = measure_rows_config.get('worksheets', {}).get(ws_name)
 
         # â”€â”€ SCRIPT_* detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         script_info = self._detect_script_visual(ws_data, converted_objects)
@@ -1172,6 +1223,8 @@ class PowerBIProjectGenerator:
         from visual_generator import resolve_visual_type as _rvt
         _raw_ct = ws_data.get('chart_type') if ws_data else None
         visual_type = _rvt(_raw_ct) if _raw_ct else 'clusteredBarChart'
+        if self._is_performance_tower_crosstab(ws_data):
+            visual_type = 'pivotTable'
 
         # Check for custom visual GUID (higher-fidelity AppSource visual)
         guid_info = None
@@ -1299,6 +1352,12 @@ class PowerBIProjectGenerator:
 
         # Add query if fields are available
         if ws_data and ws_data.get('fields'):
+            if measure_rows:
+                ws_data = dict(ws_data)
+                ws_data['filters'] = [
+                    filter_item for filter_item in ws_data.get('filters', [])
+                    if filter_item.get('field') not in (':Measure Names', 'Measure Names')
+                ]
             query = self._build_visual_query(ws_data)
             mapping_note = ws_data.pop('_visual_mapping_note', None)
             if mapping_note:
@@ -1455,6 +1514,11 @@ class PowerBIProjectGenerator:
             if visual_filters:
                 visual_json["filterConfig"] = {"filters": visual_filters}
 
+        if measure_rows and "query" in visual_json.get("visual", {}):
+            visual_filters = visual_json.setdefault('filterConfig', {}).setdefault('filters', [])
+            visual_filters.extend(self._create_measure_rows_filters(
+                ws_name, measure_rows, measure_rows_config))
+
         # Tooltip page binding (viz-in-tooltip â†’ Power BI Report Page tooltip)
         if tooltip_page_map and ws_data:
             # Check if this worksheet has a viz-in-tooltip reference
@@ -1511,6 +1575,7 @@ class PowerBIProjectGenerator:
                          f'the {missing_type} has no data to bind.',
             })
         _write_json(os.path.join(visual_dir, 'visual.json'), visual_json, ensure_ascii=False)
+        return visual_id
 
     @staticmethod
     def _parse_rich_text_runs(obj):
@@ -1618,7 +1683,8 @@ class PowerBIProjectGenerator:
             return 0
         return int(math.ceil(largest * 4 / 3 * 1.2)) + _TEXTBOX_VERTICAL_PADDING
 
-    def _create_visual_textbox(self, visuals_dir, obj, scale_x, scale_y, visual_count):
+    def _create_visual_textbox(self, visuals_dir, obj, scale_x, scale_y, visual_count,
+                               converted_objects=None):
         """Create a textbox visual from a Tableau text object.
 
         Supports rich text with bold, italic, color, font_size, and URLs
@@ -1629,6 +1695,15 @@ class PowerBIProjectGenerator:
 
         pos = obj.get('position', {})
         paragraphs = self._parse_rich_text_runs(obj)
+        # Tableau leaves parameter references as "<[Parameters].[Name]>" in
+        # text runs. Unresolved, they render literally in Power BI, so swap
+        # them for the parameter's caption the same way visual titles do.
+        if converted_objects:
+            for paragraph in paragraphs:
+                for run in paragraph.get('textRuns') or []:
+                    if isinstance(run.get('value'), str):
+                        run['value'] = self._resolve_parameter_title(
+                            run['value'], converted_objects)
 
         general_props = {"paragraphs": paragraphs}
         vertical = obj.get('vertical_align', '')
@@ -1788,35 +1863,65 @@ class PowerBIProjectGenerator:
         pos = obj.get('position', {})
         calc_col_id = obj.get('calc_column_id', '')
         column_name = calc_id_to_caption.get(calc_col_id, '')
+        param_ref = obj.get('param', '')
+        date_part_prefix = ''
+        resolved_key = ''
         if not column_name:
             # Try extracting calc ID from the 'param' field which has the form
-            # [datasource].[usr:CalcId:qk] or [datasource].[none:CalcId:nk]
-            param_ref = obj.get('param', '')
+            # [datasource].[usr:CalcId:qk], [datasource].[none:CalcId:nk] or a
+            # date-part prefix (my: month-year "As of EOM", tmn: truncated
+            # month, qy: quarter-year). Date-part prefixes may also reference
+            # physical columns (my:BALANCE_MONTH:ok), not only calculations.
             if param_ref:
                 import re
-                pm = re.search(r'\.\[(?:usr|none|yr|qr|mo|wk|dy):([^:]+):', param_ref)
+                pm = re.search(
+                    r'\.\[(?:usr|none|yr|qr|mo|wk|dy|my|tmn|qy|ym):([^:]+):',
+                    param_ref)
                 if pm:
-                    column_name = calc_id_to_caption.get(pm.group(1), '')
-        if not column_name:
-            # Try the raw calc_column_id as a physical column name
-            column_name = calc_col_id if calc_col_id else obj.get('field', obj.get('name', ''))
+                    captured_id = pm.group(1)
+                    column_name = calc_id_to_caption.get(captured_id, '')
+                    if param_ref.split(captured_id)[0].rstrip(':[').endswith(
+                            ('my', 'tmn', 'qy', 'ym')):
+                        # Date-part control (my: month-year, tmn: truncated
+                        # month, qy: quarter-year) — the slicer must stay a
+                        # date; cardinality heuristics would force List mode.
+                        date_part_prefix = 'dp'
+                    if not column_name:
+                        # Date-part prefixes (my:/tmn:/qy:) may reference a
+                        # physical column (e.g. my:BALANCE_MONTH:ok) rather
+                        # than a calculation ID.
+                        if hasattr(self, '_field_map') and captured_id in self._field_map:
+                            column_name = (self._field_map[captured_id][1]
+                                           or captured_id)
+                            resolved_key = captured_id
+            if not column_name:
+                # Try the raw calc_column_id as a physical column name
+                column_name = calc_col_id if calc_col_id else obj.get('field', obj.get('name', ''))
 
         # Resolve table via _field_map first (more reliable), then _find_column_table
         table_name = ''
         if hasattr(self, '_field_map') and column_name in self._field_map:
             table_name, column_name = self._field_map[column_name]
+        elif resolved_key and hasattr(self, '_field_map') and resolved_key in self._field_map:
+            # Column name lost its raw key during calc-map normalisation —
+            # keep the table/order mapped to the captured ID.
+            table_name, column_name = self._field_map[resolved_key]
         if not table_name:
             table_name = self._find_column_table(column_name, converted_objects)
 
         # Skip slicer if the resolved field doesn't exist in the semantic model
         # (e.g. worksheet names that leaked through as field names) or if it
         # resolved to a measure (measures cannot be used as slicer fields).
+        # Date-part controls that referenced a real column (my:/tmn:/qy:) are
+        # exempt from the elif branch — _field_map membership was verified
+        # during resolution above.
         _bim_sym = getattr(self, '_actual_bim_symbols', None) or set()
-        if _bim_sym:
+        if _bim_sym and column_name not in ('', None):
             _bim_props = {prop for (_, prop) in _bim_sym}
             if column_name not in _bim_props:
                 return
-        elif (column_name and hasattr(self, '_field_map') and
+        elif (not date_part_prefix and column_name and
+              hasattr(self, '_field_map') and
               column_name not in self._field_map):
             return
         _bim_measures = getattr(self, '_actual_bim_measure_names', None) or set()
@@ -1833,7 +1938,33 @@ class PowerBIProjectGenerator:
         obj = dict(obj, **{k: v for k, v in source_filter.items() if k != 'field'})
 
         # Determine slicer mode from parameter/field data type
-        slicer_mode = self._detect_slicer_mode(obj, column_name, converted_objects)
+        # Tableau quick-filter suffix tells the selection style:
+        #   :qk (quantitative/continuous) → from-to RANGE picker
+        #   :ok/:nk (ordinal/nominal)     → single-value dropdown
+        import re as _re
+        _suffix_match = _re.search(r':(qk|ok|nk)\]?$', param_ref or '')
+        _is_range = bool(date_part_prefix) and bool(
+            _suffix_match and _suffix_match.group(1) == 'qk')
+        if date_part_prefix and not _is_range:
+            slicer_mode = 'Dropdown'
+        elif _is_range:
+            slicer_mode = 'Between'
+        else:
+            slicer_mode = self._detect_slicer_mode(obj, column_name, converted_objects)
+
+        # Range pickers bind to a paired date column when one exists (e.g.
+        # Balance Month and Last Day Of Balance Month are 1:1 in the source).
+        # Two slicers on one column cross-constrain each other in PBI; the
+        # pair keeps the range selector independent of the top dropdown —
+        # matching the two independent date filters in the source workbook.
+        if _is_range and table_name:
+            _pair_candidates = sorted(
+                {c_prop for (t, c_prop) in self._field_map.values()
+                 if t == table_name and c_prop != column_name
+                 and column_name in c_prop},
+                key=len)
+            if _pair_candidates:
+                column_name = _pair_candidates[0]
 
         slicer_json = self._create_slicer_visual(visual_id, vx, vy, vw, vh,
                                                   column_name, table_name, visual_count,
@@ -1872,6 +2003,7 @@ class PowerBIProjectGenerator:
             })
             objects['general'] = [{'properties': {'filter': {'filter': selection}}}]
         _write_json(os.path.join(visual_dir, 'visual.json'), slicer_json, ensure_ascii=False)
+        return visual_id
 
     def _create_visual_parameter_control(self, visuals_dir, obj, scale_x, scale_y,
                                           visual_count, converted_objects):
@@ -2318,7 +2450,8 @@ class PowerBIProjectGenerator:
         return created
 
     def create_report_structure(self, project_dir, report_name, converted_objects,
-                                quick_table_calc_measures=None):
+                                quick_table_calc_measures=None,
+                                measure_rows_config=None):
         """Creates the Report structure in PBIR v4.0 format (identical to PBI Hero reference)
         
         Structure:
@@ -2347,6 +2480,8 @@ class PowerBIProjectGenerator:
         self._build_field_mapping(converted_objects)
         if quick_table_calc_measures is not None:
             self._quick_table_calc_measure_map = quick_table_calc_measures
+        if measure_rows_config is not None:
+            self._measure_rows_config = measure_rows_config
 
         # Initialize motion chart bookmarks list (may be populated by dashboard pages)
         self._motion_chart_bookmarks = []
@@ -2841,6 +2976,10 @@ class PowerBIProjectGenerator:
 
             db_objects = db.get('objects', [])
             visual_count = 0
+            # worksheet-scoped filter map: ws_name -> [visual ids] created from
+            # that worksheet's filter_controls (for visualInteractions scoping)
+            ws_filter_visuals = {}
+            ws_visual_ids = {}
 
             # Build a calc_id â†’ caption lookup for slicers
             calcs = converted_objects.get('calculations', [])
@@ -2889,10 +3028,13 @@ class PowerBIProjectGenerator:
                 if obj.get('type') == 'worksheetReference':
                     ws_name = obj.get('worksheetName', '')
                     ws_data = self._find_worksheet(worksheets, ws_name)
-                    self._create_visual_worksheet(visuals_dir, ws_data, eff_obj,
-                                                   eff_sx, eff_sy, visual_count,
-                                                   worksheets, converted_objects,
-                                                   tooltip_page_map=tooltip_page_map)
+                    created_id = self._create_visual_worksheet(
+                        visuals_dir, ws_data, eff_obj,
+                        eff_sx, eff_sy, visual_count,
+                        worksheets, converted_objects,
+                        tooltip_page_map=tooltip_page_map)
+                    if created_id:
+                        ws_visual_ids.setdefault(ws_name, []).append(created_id)
                     visual_count += 1
 
                     # Sprint 121: annotation textbox overlays
@@ -2904,7 +3046,8 @@ class PowerBIProjectGenerator:
                             visual_count += 1
 
                 elif obj.get('type') == 'text':
-                    self._create_visual_textbox(visuals_dir, eff_obj, eff_sx, eff_sy, visual_count)
+                    self._create_visual_textbox(visuals_dir, eff_obj, eff_sx, eff_sy, visual_count,
+                                                converted_objects)
                     visual_count += 1
 
                 elif obj.get('type') == 'image':
@@ -2912,9 +3055,12 @@ class PowerBIProjectGenerator:
                     visual_count += 1
 
                 elif obj.get('type') == 'filter_control':
-                    self._create_visual_filter_control(visuals_dir, eff_obj, eff_sx, eff_sy,
-                                                        visual_count, calc_id_to_caption,
-                                                        converted_objects)
+                    fc_id = self._create_visual_filter_control(
+                        visuals_dir, eff_obj, eff_sx, eff_sy,
+                        visual_count, calc_id_to_caption,
+                        converted_objects)
+                    if fc_id:
+                        ws_filter_visuals.setdefault(obj.get('name', ''), []).append(fc_id)
                     visual_count += 1
 
                 elif obj.get('type') == 'parameter_control':
@@ -2976,7 +3122,38 @@ class PowerBIProjectGenerator:
 
             # Power BI shows page tabs natively -- no explicit navigator needed
 
-            print(f"  ðŸ“Š Page '{page_display_name}': {visual_count} visuals created")
+            # Worksheet-scoped filters → visualInteractions.  In Tableau a
+            # quick filter dropped on a worksheet affects only that worksheet;
+            # a PBI slicer filters the whole page.  Restore scoping by
+            # suppressing the filter's effect on every visual that belongs to
+            # a different worksheet.  Interactions between non-filter visuals
+            # are left at the PBI default.
+            if ws_filter_visuals:
+                interactions = []
+                page_json_path = os.path.join(page_dir, 'page.json')
+                try:
+                    with open(page_json_path, encoding='utf-8') as _pf:
+                        page_json_existing = json.load(_pf)
+                except (OSError, ValueError):
+                    page_json_existing = {}
+                for scope_ws, f_ids in ws_filter_visuals.items():
+                    for fid in f_ids:
+                        for tgt_ws, tgt_ids in ws_visual_ids.items():
+                            if tgt_ws == scope_ws:
+                                continue
+                            for tid in tgt_ids:
+                                interactions.append({
+                                    'source': fid,
+                                    'target': tid,
+                                    'type': 'NoFilter',
+                                })
+                if interactions:
+                    page_json_existing['visualInteractions'] = interactions
+                    _write_json(page_json_path, page_json_existing)
+                    print(f'  🔒 Page {page_display_name!r}: '
+                          f'{len(interactions)} filter-scoping interactions')
+
+            print(f"  📊 Page '{page_display_name}': {visual_count} visuals created")
 
         return page_names
 
@@ -3481,7 +3658,12 @@ class PowerBIProjectGenerator:
         parameters = converted_objects.get('parameters', [])
         for param in parameters:
             domain = param.get('domain_type', '')
-            if domain in ('list', 'range'):
+            param_datatype = param.get('datatype', '')
+            # Date parameters get a CALENDAR What-If table even with an
+            # "any" domain (see tmdl_parameters._create_parameter_tables).
+            param_is_date_table = (domain == 'any' or not param.get('allowable_values'))
+            param_is_date_table = param_is_date_table and param_datatype in ('date', 'datetime')
+            if domain in ('list', 'range', ) or param_is_date_table:
                 raw_name = param.get('name', '').replace('[', '').replace(']', '')
                 caption = param.get('caption', '') or raw_name
                 if caption:
@@ -3613,7 +3795,7 @@ class PowerBIProjectGenerator:
         "wordCloud":                         (["Category"], ["Values"]),
     }
 
-    # Date-related words for treemap Group ordering (prefer non-date dims)
+        # Date-related words for treemap Group ordering (prefer non-date dims)
     _DATE_WORDS = frozenset({
         'date', 'time', 'datetime', 'timestamp',
         'year', 'month', 'quarter', 'week', 'day',
@@ -3726,6 +3908,10 @@ class PowerBIProjectGenerator:
         from visual_generator import resolve_visual_type as _resolve_visual_type
         raw_visual_type = ws_data.get('chart_type')
         visual_type = _resolve_visual_type(raw_visual_type) if raw_visual_type else 'clusteredBarChart'
+        measure_rows_config = getattr(self, '_measure_rows_config', {}) or {}
+        measure_rows = measure_rows_config.get('worksheets', {}).get(ws_data.get('name'))
+        if self._is_performance_tower_crosstab(ws_data):
+            visual_type = 'pivotTable'
 
         # Tableau sometimes exposes synthetic pane values for multi-axis
         # sheets. The pane metadata identifies each actual value/axis pair;
@@ -3987,18 +4173,54 @@ class PowerBIProjectGenerator:
                                     for f in table_fields]
                 }
 
-        elif visual_type == 'matrix':
-            # Matrix: first dim â†’ Rows, second dim or color dim â†’ Columns,
-            #         measures â†’ Values
-            matrix_dims = axis_dims + color_dims
-            if matrix_dims:
-                query_state["Rows"] = self._make_projection(matrix_dims[0])
-            if len(matrix_dims) >= 2:
-                query_state["Columns"] = self._make_projection(matrix_dims[1])
-            if axis_meas:
+        elif visual_type in ('matrix', 'pivotTable'):
+            # Preserve Tableau crosstab shelves: row dimensions remain rows,
+            # column dimensions (including dates) become matrix columns.
+            if visual_type == 'pivotTable':
+                matrix_rows = rows_dims
+                matrix_columns = cols_dims + color_dims
+            else:
+                matrix_dims = axis_dims + color_dims
+                matrix_rows = matrix_dims[:1]
+                matrix_columns = matrix_dims[1:2]
+            if measure_rows:
+                row_field = {
+                    'name': measure_rows_config['label_column'],
+                    'shelf': 'rows',
+                    '_resolved_pair': (
+                        measure_rows_config['table'],
+                        measure_rows_config['label_column'],
+                    ),
+                }
+                row_projection = self._make_projection_entry(row_field)
+                if row_projection:
+                    query_state['Rows'] = {'projections': [row_projection]}
+            elif matrix_rows:
+                query_state["Rows"] = {
+                    "projections": [self._make_projection_entry(f)
+                                    for f in matrix_rows]
+                }
+            if matrix_columns:
+                query_state["Columns"] = {
+                    "projections": [self._make_projection_entry(f)
+                                    for f in matrix_columns]
+                }
+            if measure_rows:
+                value_field = {
+                    'name': measure_rows_config['value_measure'],
+                    '_resolved_pair': (getattr(self, '_main_table', ''),
+                                       measure_rows_config['value_measure']),
+                }
+                value_projection = self._make_projection_entry(value_field)
+                matrix_values = [value_projection] if value_projection else []
+            else:
+                matrix_values = (axis_meas + size_fields + color_meas + tooltip_meas
+                                 or text_meas if visual_type == 'pivotTable' else axis_meas)
+            if matrix_values:
                 query_state["Values"] = {
-                    "projections": [self._make_projection_entry(m)
-                                    for m in axis_meas[:6]]
+                    "projections": (matrix_values if measure_rows else
+                                    [self._make_projection_entry(m)
+                                     for m in matrix_values])
                 }
 
         elif visual_type == 'card':
@@ -5340,6 +5562,44 @@ class PowerBIProjectGenerator:
             deduped.append(flt)
 
         return deduped
+
+    def _create_measure_rows_filters(self, worksheet_name, rows, config):
+        """Restrict a generated measure-label table to the current worksheet."""
+        table_name = config['table']
+        filters = []
+        for column, values in (
+            (config['worksheet_column'], [worksheet_name]),
+            (config['key_column'], [row['key'] for row in rows]),
+        ):
+            filters.append({
+                'name': f"Filter_{uuid.uuid4().hex[:8]}",
+                'type': 'Categorical',
+                'field': {
+                    'Column': {
+                        'Expression': {'SourceRef': {'Entity': table_name}},
+                        'Property': column,
+                    }
+                },
+                'filter': {
+                    'Version': 2,
+                    'From': [{'Name': 't', 'Entity': table_name, 'Type': 0}],
+                    'Where': [{
+                        'Condition': {
+                            'In': {
+                                'Expressions': [{
+                                    'Column': {
+                                        'Expression': {'SourceRef': {'Source': 't'}},
+                                        'Property': column,
+                                    }
+                                }],
+                                'Values': [[{'Literal': {'Value': _pbi_literal(value, 'string')}}]
+                                           for value in values],
+                            }
+                        }
+                    }],
+                },
+            })
+        return filters
     
     def _build_visual_objects(self, ws_name, ws_data, visual_type):
         """Builds visual objects (title, colors, labels, legend, axes).
