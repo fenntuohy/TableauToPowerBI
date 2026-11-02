@@ -54,6 +54,7 @@ TABLEAU_LEAK_REPLACEMENTS = (
     (r"\bDATEPART\s*\(\s*'hour'\s*,\s*", 'HOUR(', 'high'),
     (r"\bDATEPART\s*\(\s*'minute'\s*,\s*", 'MINUTE(', 'high'),
     (r"\bDATEPART\s*\(\s*'second'\s*,\s*", 'SECOND(', 'high'),
+    (r"\bDATEPART\s*\(\s*'iso-week'\s*,\s*", 'WEEKNUM_ISOWEEK(', 'high'),
 )
 
 
@@ -232,7 +233,7 @@ def validate_dax_expression(expr: str) -> List[str]:
     if _TABLEAU_FUNC_LEAK.search(text):
         issues.append('unconverted Tableau function token detected in DAX output')
 
-    if re.search(r'\b(None|undefined)\b', text, re.IGNORECASE):
+    if re.search(r'\b(None|undefined)\b', mask_literal_spans(text), re.IGNORECASE):
         issues.append('invalid literal token detected in DAX output')
 
     return issues

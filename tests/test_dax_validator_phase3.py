@@ -56,6 +56,16 @@ class TestDaxValidatorPhase3(unittest.TestCase):
         issues = validate_dax_expression("[Col] + None")
         self.assertTrue(any('invalid literal' in i for i in issues))
 
+    def test_none_inside_string_literal_is_not_flagged(self):
+        """Regression: real workbooks carry values like 'Neither (none buildable)'.
+
+        String literals are data, not code — 'none' inside quotes must not
+        trip the invalid-literal check (it forced valid DAX to BLANK()).
+        """
+        issues = validate_dax_expression(
+            'IF(ISBLANK(T[HP]) || T[HP] = "Neither (none buildable)", "Bosch", T[HP])')
+        self.assertEqual(issues, [])
+
     def test_unterminated_block_comment(self):
         issues = validate_dax_expression("/* this is incomplete SUM([A])")
         self.assertTrue(any('unterminated block comment' in i for i in issues))

@@ -88,6 +88,8 @@ _SIMPLE_FUNCTION_MAP = [
     (r'\bDATEPART\s*\(\s*[\'"]?second[\'"]?\s*,\s*', 'SECOND('),
     (r'\bDATEPART\s*\(\s*[\'"]?week[\'"]?\s*,\s*', 'WEEKNUM('),
     (r'\bDATEPART\s*\(\s*[\'"]?weekday[\'"]?\s*,\s*', 'WEEKDAY('),
+    # 'iso-week' → WEEKNUM(date, 2) (ISO 8601: weeks start Monday)
+    (r'\bDATEPART\s*\(\s*[\'"]?iso-?week[\'"]?\s*,\s*', 'WEEKNUM_ISOWEEK('),
 
     # Date functions — misc
     # DATEADD handled by _convert_dateadd (scalar: EDATE/arithmetic)
@@ -449,6 +451,7 @@ def convert_tableau_formula_to_dax(formula, column_name='Measure', table_name='T
 
     # 3b-post. Fix functions needing additional arguments
     dax = _fix_ceiling_floor(dax)
+    dax = _convert_iso_week(dax)
 
     # 3c. Special functions requiring argument reordering
     dax = _convert_datediff(dax)
@@ -866,6 +869,32 @@ def _convert_dateadd(dax_str):
 def _convert_week(dax):
     """Convert Tableau WEEK(date) to DAX WEEKNUM(date, 2) (Monday-based)."""
     pattern = _get_func_pattern('WEEK', word_boundary=True)
+    match = pattern.search(dax)
+    while match:
+        start = match.end()
+        depth, i = 1, start
+        while i < len(dax) and depth:
+            if dax[i] == '(':
+                depth += 1
+            elif dax[i] == ')':
+                depth -= 1
+            i += 1
+        if depth:
+            return dax
+        date_expr = dax[start:i - 1].strip()
+        dax = dax[:match.start()] + f'WEEKNUM({date_expr}, 2)' + dax[i:]
+        match = pattern.search(dax, match.start() + 8)
+    return dax
+
+
+def _convert_iso_week(dax):
+    """Fix the DATEPART('iso-week') sentinel: WEEKNUM_ISOWEEK(x) → WEEKNUM(x, 2).
+
+    DATEPART('iso-week', date) is mapped to the WEEKNUM_ISOWEEK sentinel in the
+    simple-function map so it is not shadowed by the plain-'week' rule; here it
+    becomes ISO-8601 WEEKNUM(x, 2) (weeks start Monday).
+    """
+    pattern = _get_func_pattern('WEEKNUM_ISOWEEK', word_boundary=True)
     match = pattern.search(dax)
     while match:
         start = match.end()

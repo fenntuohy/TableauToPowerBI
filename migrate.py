@@ -4221,7 +4221,13 @@ def _print_migration_summary(results, report_summary, start_time):
             pbi_validation_passed = pbi_result.get('passed', True)
 
             if pbi_errors or pbi_warnings:
-                print(f"\n  PBI Desktop Validation:")
+                if not pbi_errors:
+                    # Warnings alone don't fail validation — still emit the
+                    # success marker so pipeline gates key on errors, not noise.
+                    print(f"\n  PBI Desktop Validation: ✓ No errors detected"
+                          f" ({len(pbi_warnings)} warning(s))")
+                else:
+                    print(f"\n  PBI Desktop Validation:")
                 if pbi_errors:
                     print(f"    ✗ {len(pbi_errors)} error(s) — these will cause errors in PBI Desktop:")
                     for e in pbi_errors[:20]:

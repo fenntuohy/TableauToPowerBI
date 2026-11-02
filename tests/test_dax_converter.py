@@ -815,6 +815,32 @@ class TestDateFunctionsExpanded(unittest.TestCase):
         result_lower = result.lower()
         self.assertTrue('weeknum' in result_lower or 'week' in result_lower)
 
+    def test_datepart_iso_week(self):
+        """Regression: DATEPART('iso-week') leaked into DAX (Conversion Rates.twbx).
+
+        Must become ISO-8601 WEEKNUM(x, 2) — weeks start Monday — never a
+        bare DATEPART token (DAX has no DATEPART function).
+        """
+        result = convert_tableau_formula_to_dax(
+            "IF [Parameters].[Parameter 1] = 'week' then \"W\" + str(DATEPART('iso-week', [INFLOW_DATE]))"
+            " ELSE left(DATENAME('month', [INFLOW_DATE]),3) + \" \""
+            " + right( str(DATEPART('year',[INFLOW_DATE])),2) end",
+            column_name='t_iso_week',
+        )
+        self.assertNotIn('DATEPART', result.upper())
+        self.assertIn('WEEKNUM(', result)
+        self.assertIn(', 2)', result)
+
+    def test_datepart_iso_week_double_quoted(self):
+        result = convert_tableau_formula_to_dax('DATEPART("iso-week", [OrderDate])')
+        self.assertNotIn('DATEPART', result.upper())
+        self.assertIn('WEEKNUM(', result)
+
+    def test_datepart_iso_week_does_not_shadow_plain_week(self):
+        """The iso-week rule must not rewrite plain DATEPART('week', ...)."""
+        plain = convert_tableau_formula_to_dax("DATEPART('week', [OrderDate])")
+        self.assertNotIn('WEEKNUM(, 2)', plain.replace(' ', ''))
+
     def test_makedate(self):
         result = convert_tableau_formula_to_dax("MAKEDATE(2023, 1, 15)")
         self.assertIn("DATE", result)

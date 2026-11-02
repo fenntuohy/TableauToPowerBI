@@ -364,8 +364,47 @@ class ArtifactValidator:
                 desc = re.sub(r'\\b|\\s\*|\(\?<!\[<>!\]\)', '', desc)
                 repairs.append(desc)
                 result = pattern.sub(replacement, result)
+        result, iso_repairs = cls._resolve_isoweek_sentinel(result)
+        repairs.extend(iso_repairs)
 
         return result, repairs
+
+    @staticmethod
+    def _resolve_isoweek_sentinel(formula):
+        """WEEKNUM_ISOWEEK(x) → WEEKNUM(x, 2) (ISO 8601, weeks start Monday).
+
+        The DATEPART('iso-week') repair emits a sentinel name so the plain
+        'week' rule cannot consume it first; resolve it here, skipping
+        string/comment spans so literal text is left alone.
+        """
+        repairs = []
+        pattern = re.compile(r'\bWEEKNUM_ISOWEEK\s*\(', re.IGNORECASE)
+        cursor = 0
+        while True:
+            match = pattern.search(formula, cursor)
+            if not match:
+                break
+            depth = 1
+            i = match.end()
+            in_str = False
+            while i < len(formula) and depth > 0:
+                ch = formula[i]
+                if ch == '"':
+                    in_str = not in_str
+                elif not in_str:
+                    if ch == '(':
+                        depth += 1
+                    elif ch == ')':
+                        depth -= 1
+                i += 1
+            if depth != 0:
+                break
+            # i sits just past the balanced closing ')' of the sentinel call;
+            # splice the ISO-8601 week-type argument in before it.
+            formula = formula[:match.start()] + 'WEEKNUM(' + formula[match.end():i - 1] + ', 2)' + formula[i:]
+            repairs.append(r"DATEPART\s*\(\s*'iso-week' → WEEKNUM(x, 2)")
+            cursor = match.start() + len('WEEKNUM(')
+        return formula, repairs
 
     @staticmethod
     def _replace_null_functions(formula):

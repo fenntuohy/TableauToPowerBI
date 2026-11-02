@@ -34,7 +34,8 @@ class TestLeakHealing(unittest.TestCase):
     def test_healed_output_passes_the_validator(self):
         """The healer must not declare success on DAX the validator rejects."""
         for expr in ('COUNTD(T[A])', "DATEPART('month', T[D])",
-                     "DATEPART('quarter', T[D])"):
+                     "DATEPART('quarter', T[D])",
+                     "DATEPART('iso-week', T[D])"):
             with self.subTest(expression=expr):
                 healed = heal_dax(expr).healed
                 self.assertEqual(validate_dax_expression(healed), [])
@@ -95,6 +96,13 @@ class TestCanonicalRepairTable(unittest.TestCase):
         fixed, repairs = ArtifactValidator.auto_fix_dax_leaks('COUNTD(T[A])')
         self.assertEqual(fixed, 'DISTINCTCOUNT(T[A])')
         self.assertTrue(repairs)
+
+    def test_validator_auto_fix_resolves_isoweek_sentinel(self):
+        """DATEPART('iso-week') auto-fix must end as valid WEEKNUM(x, 2)."""
+        fixed, repairs = ArtifactValidator.auto_fix_dax_leaks(
+            "DATEPART('iso-week', T[Date])")
+        self.assertEqual(fixed, 'WEEKNUM(T[Date], 2)')
+        self.assertEqual(validate_dax_expression(fixed), [])
 
 
 if __name__ == '__main__':
