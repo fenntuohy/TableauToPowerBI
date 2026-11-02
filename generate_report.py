@@ -734,7 +734,7 @@ def generate_html(assessments, reports, metadata, lineage=None, pbi_validation=N
         elif vtm:
             _mark_to_pbi = {
                 "Automatic": "table", "Bar": "clusteredBarChart",
-                "Stacked Bar": "stackedBarChart", "Line": "lineChart",
+                "Stacked Bar": "barChart", "Line": "lineChart",
                 "Area": "areaChart", "Pie": "pieChart", "Circle": "scatterChart",
                 "Square": "treemap", "Text": "tableEx", "Map": "map",
                 "Polygon": "filledMap", "Gantt Bar": "clusteredBarChart",

@@ -24,6 +24,14 @@ def test_multiple_measures_alone_do_not_promote_a_table_to_dual_axis():
     assert DualAxisBuilder.detect_dual_axis_worksheet(worksheet) is False
 
 
+def test_explicit_dual_axis_metadata_still_promotes_to_combo():
+    worksheet = {
+        'axes': {'dual_axis': True, 'dual_axis_sync': True},
+        'fields': [{'name': 'Revenue'}, {'name': 'Profit'}],
+    }
+    assert DualAxisBuilder.detect_dual_axis_worksheet(worksheet) is True
+
+
 def test_reference_line_normalization():
     worksheet = {
         "reference_lines": [

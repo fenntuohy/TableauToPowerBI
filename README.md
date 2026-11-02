@@ -655,7 +655,8 @@ SharedSales/
 | Tableau Mark | Power BI visualType | Notes |
 |-------------|-------------------|-------|
 | Bar | `clusteredBarChart` | Standard bar |
-| Stacked Bar | `stackedBarChart` | |
+| Stacked Bar | `barChart` | Built-in stacked horizontal bar; columns use `columnChart` |
+| Stacked Bar with a separate Tableau measure pane | `lineStackedColumnComboChart` | Stacked columns plus a line; pane axis metadata determines the measure bindings |
 | Line | `lineChart` | With markers |
 | Area | `areaChart` | |
 | Pie | `pieChart` | |

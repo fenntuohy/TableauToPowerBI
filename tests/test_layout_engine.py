@@ -633,6 +633,66 @@ class TestResponsiveBreakpoints(unittest.TestCase):
 class TestDashboardPagesGridLayout(unittest.TestCase):
     """Integration tests for _create_dashboard_pages() with zone_hierarchy."""
 
+    def test_performance_tower_tables_reflow_full_width_before_charts(self):
+        db = {
+            'name': 'Performance Tower - Overview',
+            'size': {'width': 1300, 'height': 800},
+            'objects': [
+                {'type': 'worksheetReference', 'worksheetName': 'On Time'},
+                {'type': 'worksheetReference', 'worksheetName': 'Trend'},
+                {'type': 'worksheetReference', 'worksheetName': 'Push'},
+                {'type': 'worksheetReference', 'worksheetName': 'Details'},
+            ],
+        }
+        worksheets = [
+            {'name': 'On Time', 'chart_type': 'tableEx',
+             'fields': [{'shelf': 'measure_value'}] * 12},
+            {'name': 'Trend', 'chart_type': 'lineChart', 'fields': []},
+            {'name': 'Push', 'chart_type': 'tableEx',
+             'fields': [{'shelf': 'measure_value'}] * 3},
+            {'name': 'Details', 'chart_type': 'tableEx',
+             'fields': [{'shelf': 'measure_value'}] * 3},
+        ]
+
+        positions, page_height = PowerBIProjectGenerator._performance_tower_layout(
+            db, worksheets, 1300)
+
+        self.assertEqual(positions['On Time'], {'x': 16, 'y': 290, 'w': 1268, 'h': 270})
+        self.assertEqual(positions['Push']['x'], 16)
+        self.assertEqual(positions['Push']['w'], 1268)
+        self.assertEqual(positions['Push']['h'], 190)
+        self.assertEqual(positions['Details']['x'], 16)
+        self.assertGreater(positions['Trend']['y'], positions['Details']['y'])
+        self.assertGreater(page_height, 800)
+
+    def test_performance_tower_matrix_uses_full_width_table_layout(self):
+        db = {
+            'name': 'Performance Tower - Overview',
+            'size': {'width': 1300, 'height': 800},
+            'objects': [{'type': 'worksheetReference',
+                         'worksheetName': '3PL Perfornance - Push Performance'}],
+        }
+        worksheets = [{
+            'name': '3PL Perfornance - Push Performance',
+            'chart_type': 'pivotTable',
+            'fields': [{'name': 'Week date', 'shelf': 'columns'}],
+        }]
+        positions, _ = PowerBIProjectGenerator._performance_tower_layout(
+            db, worksheets, 1300)
+        self.assertEqual(positions['3PL Perfornance - Push Performance']['x'], 16)
+        self.assertEqual(positions['3PL Perfornance - Push Performance']['w'], 1268)
+        self.assertGreaterEqual(positions['3PL Perfornance - Push Performance']['h'], 190)
+
+    def test_other_dashboard_keeps_source_layout(self):
+        db = {
+            'name': 'Other Dashboard',
+            'size': {'width': 1300, 'height': 800},
+        }
+        positions, page_height = PowerBIProjectGenerator._performance_tower_layout(
+            db, [], 1300)
+        self.assertEqual(positions, {})
+        self.assertEqual(page_height, 800)
+
     def test_grid_layout_used_when_zone_hierarchy_present(self):
         """When zone_hierarchy is present, visuals should use grid-snapped positions."""
         gen = _make_generator()

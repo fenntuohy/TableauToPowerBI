@@ -516,6 +516,55 @@ def _detect_many_to_many(model, datasources):
                 print(f"  ⚠️  Relation → '{to_table}.{to_col}' set to manyToMany (cannot verify uniqueness, single-direction).")
 
 
+def _deactivate_ambiguous_many_to_many_paths(model):
+    """Deactivate a many-to-many relationship that creates two filter paths.
+
+    A m2m relationship is a filter path in Power BI. If both of its tables also
+    reach the same dimension, the model has two routes to that dimension and
+    refresh fails with::
+
+        There are ambiguous paths between 'Extract' and 'Calendar':
+        'Extract'->'REP_LEASE...'->'Calendar' and 'Extract'->'Calendar'
+
+    This went unnoticed while no relationships were compiled at all. Keeping
+    the m2m (it is the correct cardinality for two fact tables) but marking it
+    inactive preserves the joiner for explicitly-activated use and leaves the
+    direct path as the single active route.
+    """
+    rels = model.get('model', {}).get('relationships', [])
+    if not rels:
+        return
+
+    # Map each table to the dimensions it reaches directly.
+    dims_by_table = {}
+    for rel in rels:
+        if not rel.get('isActive', True):
+            continue
+        from_t, to_t = rel.get('fromTable'), rel.get('toTable')
+        if from_t and to_t:
+            dims_by_table.setdefault(from_t, set()).add(to_t)
+
+    for rel in rels:
+        if not rel.get('isActive', True):
+            continue
+        if not (rel.get('fromCardinality') == 'many'
+                and rel.get('toCardinality') == 'many'):
+            continue
+        from_t, to_t = rel.get('fromTable'), rel.get('toTable')
+        if not from_t or not to_t:
+            continue
+        shared = (dims_by_table.get(from_t, set())
+                  & dims_by_table.get(to_t, set()))
+        # A shared dimension other than the peer table itself means two routes.
+        shared.discard(from_t)
+        shared.discard(to_t)
+        if shared:
+            rel['isActive'] = False
+            print(f"  ⚠️  Relation '{from_t}'->'{to_t}' set inactive "
+                  f"(many-to-many would create ambiguous paths via "
+                  f"{', '.join(sorted(shared))}).")
+
+
 def _fix_relationship_type_mismatches(model):
     """
     Fix type mismatches between relationship key columns.

@@ -35,7 +35,7 @@ except ImportError:
 # ── Visual type mapping (subset for display — full map in visual_generator) ──
 
 _MARK_TO_PBI = {
-    'bar': 'clusteredBarChart', 'stacked-bar': 'stackedBarChart',
+    'bar': 'clusteredBarChart', 'stacked-bar': 'barChart',
     'line': 'lineChart', 'area': 'areaChart',
     'pie': 'pieChart', 'donut': 'donutChart',
     'circle': 'scatterChart', 'shape': 'scatterChart',

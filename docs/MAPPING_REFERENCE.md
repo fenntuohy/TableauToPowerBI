@@ -17,10 +17,10 @@ source-to-target status without treating approximations as native parity.
 | Tableau Mark/Type | Power BI visualType | Notes |
 |-------------------|-------------------|-------|
 | Bar | clusteredBarChart | Standard horizontal bar |
-| Stacked Bar | stackedBarChart | |
+| Stacked Bar | `barChart` | Built-in stacked horizontal bar; vertical orientation uses `columnChart` |
 | 100% Stacked Bar | hundredPercentStackedBarChart | Percentages |
 | Bar (Vertical) / Column | clusteredColumnChart | Vertical orientation |
-| Stacked Column | stackedColumnChart | |
+| Stacked Column | `columnChart` | Built-in stacked column |
 | 100% Stacked Column | hundredPercentStackedColumnChart | |
 | Histogram | clusteredColumnChart | Binned data |
 | Gantt Bar / Lollipop | clusteredBarChart | Approximation |
@@ -52,6 +52,7 @@ source-to-target status without treating approximations as native parity.
 | Dual Axis | lineClusteredColumnComboChart | Two Y axes |
 | Combo / Pareto | lineClusteredColumnComboChart | |
 | Line + Stacked Column | lineStackedColumnComboChart | |
+| Stacked bar mark with separate Tableau measure panes | lineStackedColumnComboChart | Bar pane becomes stacked columns; the other measure pane becomes the line axis |
 
 ### Scatter & Bubble
 

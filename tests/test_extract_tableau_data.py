@@ -309,17 +309,58 @@ class TestDetermineChartType(unittest.TestCase):
         </table></worksheet>''')
         self.assertEqual(self.ext.determine_chart_type(ws), 'tableEx')
 
-    def test_bar_pane_with_color_is_stacked_bar_and_all_pane_marks_are_kept(self):
-        ws = ET.fromstring('''<worksheet><table><cols/><rows/>
+    def test_bar_pane_with_color_and_columns_dimension_is_stacked_column(self):
+        ws = ET.fromstring('''<worksheet><table>
+          <cols>[ds].[none:Week:ok]</cols><rows>[ds].[sum:Sales:qk]</rows>
           <panes>
             <pane><mark class="Automatic"/></pane>
             <pane><mark class="Bar"/><encodings>
               <color column="[ds].[none:Is UZB:nk]"/>
             </encodings></pane>
           </panes></table></worksheet>''')
-        self.assertEqual(self.ext.determine_chart_type(ws), 'stackedBarChart')
+        self.assertEqual(self.ext.determine_chart_type(ws), 'columnChart')
         self.assertEqual(self.ext._extract_mark_class(ws), 'Bar')
         self.assertEqual(self.ext.extract_mark_classes(ws), ['Automatic', 'Bar'])
+
+    def test_stacked_bar_with_measure_on_columns_stays_horizontal(self):
+        ws = ET.fromstring('''<worksheet><table>
+          <cols>[ds].[sum:Sales:qk]</cols><rows>[ds].[none:Week:nk]</rows>
+          <panes><pane><mark class="Bar"/><encodings>
+            <color column="[ds].[none:Region:nk]"/>
+          </encodings></pane></panes></table></worksheet>''')
+        self.assertEqual(self.ext.determine_chart_type(ws), 'barChart')
+
+    def test_bar_pane_and_second_pane_axis_infers_combo(self):
+        ws = ET.fromstring('''<worksheet><table>
+          <cols>[ds].[none:Week:ok]</cols><rows>[ds].[sum:Sales:qk]</rows>
+          <panes>
+            <pane y-axis-name="[ds].[sum:Rate:qk]"><mark class="Automatic"/></pane>
+            <pane y-axis-name="[ds].[sum:Count:qk]"><mark class="Bar"/><encodings>
+              <color column="[ds].[none:Region:nk]"/>
+            </encodings></pane>
+          </panes></table></worksheet>''')
+        self.assertEqual(self.ext.determine_chart_type(ws), 'lineStackedColumnComboChart')
+
+    def test_pane_axis_references_detect_dual_axis_without_axis_elements(self):
+        ws = ET.fromstring('''<worksheet>
+          <panes>
+          <pane y-axis-name="[ds].[sum:Rate:qk]"><mark class="Automatic"/></pane>
+          <pane y-axis-name="[ds].[sum:Count:qk]"><mark class="Bar"/></pane>
+          </panes>
+        </worksheet>''')
+        self.assertTrue(self.ext.extract_axes(ws)['dual_axis'])
+
+    def test_pane_axis_metadata_is_preserved(self):
+        ws = ET.fromstring('''<worksheet><table><cols/><rows/>
+          <panes><pane id="1"><mark class="Automatic"/></pane>
+          <pane id="2" y-axis-name="[ds].[usr:Revenue:qk]"><mark class="Bar"/>
+            <encodings><color column="[ds].[none:Region:nk]"/></encodings>
+          </pane></panes></table></worksheet>''')
+        self.assertEqual(self.ext.extract_mark_panes(ws), [{
+            'mark_class': 'Automatic', 'value_field': '', 'color_field': '',
+        }, {
+            'mark_class': 'Bar', 'value_field': 'Revenue', 'color_field': 'Region',
+        }])
 
     def test_measure_values_text_crosstab_is_a_table(self):
         ws = ET.fromstring('''<worksheet><table>
@@ -1579,6 +1620,18 @@ class TestExtractDynamicTitle(unittest.TestCase):
         dt = self.ext.extract_dynamic_title(ws)
         self.assertFalse(dt['is_dynamic'])
         self.assertEqual(dt['parts'][0]['value'], 'Sales Report')
+
+    def test_title_text_cleans_tableau_line_break_sentinel(self):
+        ws = ET.fromstring('''
+        <worksheet><title><formatted-text>
+            <run fontcolor="#666666">AV/UZB</run>
+            <run>Æ\n</run>
+            <run fontcolor="#666666">IDS, Rhenus, DHL, CTL</run>
+        </formatted-text></title></worksheet>''')
+        self.assertEqual(
+            self.ext._extract_title_text(ws),
+            'AV/UZB\nIDS, Rhenus, DHL, CTL',
+        )
 
     def test_dynamic_title_with_field(self):
         ws = ET.fromstring('''

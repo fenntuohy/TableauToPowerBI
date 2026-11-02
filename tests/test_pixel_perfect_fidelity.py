@@ -201,6 +201,47 @@ class TestTitleFontFidelity(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_worksheet_title_second_line_becomes_subtitle(self):
+        gen = _make_generator()
+        gen._field_map = {}
+        gen._main_table = 'Table'
+        gen._find_worksheet = lambda worksheets, name: {
+            'name': name,
+            'title': 'AV/UZB\nIDS, Rhenus, DHL, CTL',
+            'fields': [], 'filters': [], 'mark_encoding': {},
+        }
+        db = {
+            'name': 'Test',
+            'size': {'width': 1280, 'height': 720},
+            'filters': [],
+            'objects': [{
+                'type': 'worksheetReference',
+                'worksheetName': 'AV UZB Carriers',
+                'position': {'x': 0, 'y': 0, 'w': 400, 'h': 300},
+            }],
+        }
+        tmpdir = tempfile.mkdtemp()
+        try:
+            pages_dir = os.path.join(tmpdir, 'pages')
+            os.makedirs(pages_dir, exist_ok=True)
+            gen._create_dashboard_pages(
+                pages_dir, [db],
+                [{'name': 'AV UZB Carriers', 'title': 'AV/UZB\nIDS, Rhenus, DHL, CTL',
+                  'fields': [], 'filters': [], 'mark_encoding': {}}],
+                {'calculations': [], 'actions': []}, {},
+            )
+            visuals_dir = os.path.join(pages_dir, 'ReportSection', 'visuals')
+            visual_dir = os.listdir(visuals_dir)[0]
+            with open(os.path.join(visuals_dir, visual_dir, 'visual.json'), 'r') as f:
+                visual_json = json.load(f)
+            objects = visual_json['visual']['visualContainerObjects']
+            title = objects['title'][0]['properties']['text']['expr']['Literal']['Value']
+            subtitle = objects['subTitle'][0]['properties']['text']['expr']['Literal']['Value']
+            self.assertEqual(title, "'AV/UZB'")
+            self.assertEqual(subtitle, '"IDS, Rhenus, DHL, CTL"')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 # ── Label font fidelity ────────────────────────────────────────────
 

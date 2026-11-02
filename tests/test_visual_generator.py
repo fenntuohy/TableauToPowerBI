@@ -47,13 +47,23 @@ class TestVisualTypeMapping(unittest.TestCase):
 
     def test_bar_types(self):
         self.assertEqual(resolve_visual_type("bar"), "clusteredBarChart")
-        self.assertEqual(resolve_visual_type("stacked-bar"), "stackedBarChart")
+        self.assertEqual(resolve_visual_type("stacked-bar"), "barChart")
         self.assertEqual(resolve_visual_type("100-stacked-bar"), "hundredPercentStackedBarChart")
 
     def test_column_types(self):
         self.assertEqual(resolve_visual_type("column"), "clusteredColumnChart")
         self.assertEqual(resolve_visual_type("histogram"), "clusteredColumnChart")
-        self.assertEqual(resolve_visual_type("stacked-column"), "stackedColumnChart")
+        self.assertEqual(resolve_visual_type("stacked-column"), "columnChart")
+
+    def test_stacked_types_resolve_to_power_bi_builtin_names(self):
+        self.assertEqual(resolve_visual_type("stackedBarChart"), "barChart")
+        self.assertEqual(resolve_visual_type("stackedColumnChart"), "columnChart")
+
+    def test_stacked_combo_type_resolves_to_native_combo(self):
+        self.assertEqual(
+            resolve_visual_type("lineStackedColumnComboChart"),
+            "lineStackedColumnComboChart",
+        )
 
     def test_line_area(self):
         self.assertEqual(resolve_visual_type("line"), "lineChart")

@@ -69,8 +69,7 @@ KNOWN_VISUAL_TYPES: Set[str] = {
     'lineStackedColumnComboChart', 'map', 'matrix',
     'multiRowCard', 'pieChart', 'pivotTable', 'ribbonChart',
     'scatterChart', 'scriptVisual', 'shape', 'shapeMap',
-    'slicer', 'stackedAreaChart', 'stackedBarChart',
-    'stackedColumnChart', 'table', 'tableEx', 'textbox',
+    'slicer', 'stackedAreaChart', 'table', 'tableEx', 'textbox',
     'treemap', 'waterfallChart', 'wordCloud',
     # Custom visuals (community / AppSource)
     'ViolinPlot1.0.0', 'ParallelCoordinates1.0.0',

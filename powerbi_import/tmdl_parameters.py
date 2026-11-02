@@ -123,6 +123,70 @@ def _create_parameter_tables(model, parameters, main_table_name):
             continue
 
         if domain_type == 'any' or not allowable_values:
+            # Date-typed parameters (e.g. Tableau "Current Period" /
+            # "Previous Period" date pickers) need a selectable table so a
+            # parameter-control slicer can exist. A constant measure alone
+            # leaves the report with no date selector.
+            if datatype in ('date', 'datetime'):
+                param_table = {
+                    "name": safe_caption,
+                    "columns": [{
+                        "name": "Value",
+                        "dataType": "dateTime",
+                        "sourceColumn": "Value",
+                        "formatString": "Short Date",
+                        "annotations": [
+                            {"name": "displayFolder", "value": "Parameters"}
+                        ]
+                    }],
+                    "measures": [{
+                        "name": safe_caption,
+                        "expression": (
+                            f"SELECTEDVALUE('{safe_caption.replace(chr(39), chr(39)*2)}'[Value], "
+                            f"{default_expr})"),
+                        "formatString": "Short Date",
+                        "annotations": [
+                            {"name": "displayFolder", "value": "Parameters"},
+                            {"name": "MigrationNote",
+                             "value": "Tableau date parameter — CALENDAR table "
+                                      "generated so the date picker has a "
+                                      "selectable source; adjust range in the "
+                                      "partition expression if needed."}
+                        ]
+                    }],
+                    "partitions": [{
+                        "name": safe_caption,
+                        "mode": "import",
+                        "source": {
+                            "type": "m",
+                            # M-backed (not DAX calculated): the PBIP→PBIX
+                            # compiler drops calculated partitions into empty
+                            # stubs ("no partition M → empty table"), which
+                            # leaves the date picker blank. List.Dates is a
+                            # real M partition → refreshed/preserved.
+                            "expression": (
+                                "let\n"
+                                "    StartDate = #date(2024, 1, 1),\n"
+                                "    EndDate = #date(2030, 12, 31),\n"
+                                "    DayCount = Duration.Days(EndDate - StartDate) + 1,\n"
+                                "    DateList = List.Dates(StartDate, DayCount, #duration(1, 0, 0, 0)),\n"
+                                "    ToTable = Table.FromList(DateList, Splitter.SplitByNothing(), {\"Value\"}),\n"
+                                "    TypedTable = Table.TransformColumnTypes(ToTable, {{\"Value\", type date}})\n"
+                                "in\n"
+                                "    TypedTable")
+                        }
+                    }],
+                    "annotations": [
+                        {"name": "MigrationNote",
+                         "value": "Tableau date parameter — What-If date table "
+                                  "(CALENDAR 2024–2030) replaces a constant "
+                                  "date measure so the value remains "
+                                  "user-selectable."}
+                    ]
+                }
+                model["model"]["tables"].append(param_table)
+                continue
+
             # Determine the constant-value DAX expression for the parameter.
             # Tableau may escape embedded quotes either by doubling them ("")
             # or with a backslash (\"). Both are normalized and re-escaped to

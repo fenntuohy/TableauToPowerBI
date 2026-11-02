@@ -547,6 +547,24 @@ class TestInferAutoChartType(unittest.TestCase):
         measure_values = [f['name'] for f in fields if f['shelf'] == 'measure_value']
         self.assertEqual(measure_values, ['PDD [#] (copy)_123'])
 
+    def test_measure_names_filter_decodes_escaped_nested_bracket_calculation_name(self):
+        xml = '''<worksheet name="S"><table>
+          <cols>[DS].[Week]</cols><rows>[DS].[:Measure Names]</rows>
+          <filters><filter class="categorical" column="[DS].[:Measure Names]">
+            <groupfilter function="union">
+              <groupfilter function="member" member="&quot;[DS].[usr:Late deliveries (after MT 10 Uhr) [\\#]] (copy)_456:vtavg:qk]&quot;"/>
+            </groupfilter>
+          </filter></filters></table>
+          <datasource-dependencies datasource="DS">
+            <column name="[Late deliveries (after MT 10 Uhr) [#]] (copy)_456]" role="measure"/>
+            <column-instance column="[Late deliveries (after MT 10 Uhr) [#]] (copy)_456]" derivation="User" name="[usr:Late deliveries (after MT 10 Uhr) [#]] (copy)_456:vtavg:qk]"/>
+          </datasource-dependencies>
+        </worksheet>'''
+        ext, _ = _make_extractor()
+        fields = ext.extract_worksheet_fields(ET.fromstring(xml))
+        measure_values = [f['name'] for f in fields if f['shelf'] == 'measure_value']
+        self.assertEqual(measure_values, ['Late deliveries (after MT 10 Uhr) [#] (copy)_456'])
+
     def test_measure_names_user_derivation_included(self):
         """User-derived column-instances (calculations) included."""
         xml = '''<worksheet name="S">

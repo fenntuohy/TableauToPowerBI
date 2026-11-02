@@ -9,6 +9,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import glob
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -515,6 +516,191 @@ class TestBuildVisualQuery(unittest.TestCase):
     def _query(self, chart_type, fields):
         ws = {'chart_type': chart_type, 'fields': fields}
         return self.gen._build_visual_query(ws)
+
+    def test_performance_tower_crosstab_keeps_week_date_in_matrix_columns(self):
+        self.gen._field_map.update({
+            'Week date': ('Sales', 'Week date'),
+            'Delivery Category': ('Sales', 'Delivery Category'),
+            'PDD #': ('Sales', 'PDD #'),
+        })
+        self.gen._actual_bim_symbols = {
+            ('Sales', 'Week date'), ('Sales', 'Delivery Category'),
+            ('Sales', 'PDD #'),
+        }
+        self.gen._actual_bim_measure_names = {'PDD #'}
+        self.gen._measure_names = {'PDD #'}
+        self.gen._bim_measure_names = {'PDD #'}
+        worksheet = {
+            'name': '3PL Perfornance - Push Performance',
+            'chart_type': 'tableEx',
+            'fields': [
+                {'name': 'Week date', 'shelf': 'columns'},
+                {'name': 'Delivery Category', 'shelf': 'rows'},
+                {'name': 'PDD #', 'shelf': 'measure_value'},
+            ],
+        }
+
+        self.assertTrue(self.gen._is_performance_tower_crosstab(worksheet))
+        roles = self.gen._build_visual_query(worksheet)['queryState']
+
+        self.assertEqual(set(roles), {'Columns', 'Rows', 'Values'})
+        self.assertEqual(roles['Columns']['projections'][0]['nativeQueryRef'], 'Week date')
+        self.assertEqual(roles['Rows']['projections'][0]['nativeQueryRef'], 'Delivery Category')
+        self.assertEqual(roles['Values']['projections'][0]['nativeQueryRef'], 'PDD #')
+
+    def test_measure_names_matrix_uses_one_numeric_selector_projection(self):
+        self.gen._main_table = 'Sales'
+        self.gen._measure_rows_config = {
+            'table': 'Tableau Measure Rows',
+            'worksheet_column': 'Worksheet',
+            'label_column': 'Measure',
+            'key_column': 'MeasureKey',
+            'value_measure': 'Tableau Measure Rows Value',
+            'worksheets': {'3PL Perfornance - On Time': [
+                {'label': 'Revenue', 'key': '0',
+                 'measure': {'table': 'Sales', 'name': 'Revenue', 'aggregation': 'avg'}},
+                {'label': 'Profit', 'key': '1',
+                 'measure': {'table': 'Sales', 'name': 'Profit', 'aggregation': 'avg'}},
+            ]},
+        }
+        self.gen._field_map.update({'Week': ('Sales', 'Week')})
+        self.gen._actual_bim_symbols = {
+            ('Sales', 'Week'), ('Tableau Measure Rows', 'Measure'),
+            ('Sales', 'Tableau Measure Rows Value'),
+        }
+        self.gen._actual_bim_measure_names = {'Tableau Measure Rows Value'}
+        self.gen._measure_names = {'Tableau Measure Rows Value'}
+        self.gen._bim_measure_names = {'Tableau Measure Rows Value'}
+        worksheet = {
+            'name': '3PL Perfornance - On Time', 'chart_type': 'tableEx',
+            'fields': [
+                {'name': 'Week', 'shelf': 'columns'},
+                {'name': ':Measure Names', 'shelf': 'rows'},
+                {'name': 'Revenue', 'shelf': 'measure_value'},
+            ],
+        }
+
+        roles = self.gen._build_visual_query(worksheet)['queryState']
+
+        self.assertEqual(roles['Rows']['projections'][0]['nativeQueryRef'], 'Measure')
+        self.assertEqual(roles['Columns']['projections'][0]['nativeQueryRef'], 'Week')
+        self.assertEqual(roles['Values']['projections'][0]['nativeQueryRef'],
+                         'Tableau Measure Rows Value')
+
+    def test_performance_tower_crosstab_detects_calculated_week_date_type(self):
+        self.gen._field_map['Calculation_Week'] = ('Sales', 'Week date')
+        self.gen._actual_bim_column_types = {('Sales', 'Week date'): 'dateTime'}
+        worksheet = {
+            'name': 'UZBs/AV', 'chart_type': 'tableEx',
+            'fields': [
+                {'name': 'Calculation_Week', 'shelf': 'columns'},
+                {'name': 'AV #', 'shelf': 'measure_value'},
+            ],
+        }
+        self.assertTrue(self.gen._is_performance_tower_crosstab(worksheet))
+
+    def test_performance_tower_matrix_values_keep_text_shelf_measures(self):
+        self.gen._field_map.update({
+            'Week date': ('Sales', 'Week date'),
+            'Measure Heading': ('Sales', 'Measure Heading'),
+            'Sales Value': ('Sales', 'Sales Value'),
+        })
+        self.gen._actual_bim_symbols = {
+            ('Sales', 'Week date'), ('Sales', 'Measure Heading'),
+            ('Sales', 'Sales Value'),
+        }
+        self.gen._actual_bim_measure_names = {'Sales Value'}
+        self.gen._measure_names = {'Sales Value'}
+        self.gen._bim_measure_names = {'Sales Value'}
+        worksheet = {
+            'name': 'UZBs/AV', 'chart_type': 'tableEx',
+            'fields': [
+                {'name': 'Week date', 'shelf': 'columns'},
+                {'name': 'Measure Heading', 'shelf': 'rows'},
+                {'name': 'Sales Value', 'shelf': 'text'},
+            ],
+        }
+        self.assertTrue(self.gen._is_performance_tower_crosstab(worksheet))
+        roles = self.gen._build_visual_query(worksheet)['queryState']
+        self.assertEqual(set(roles), {'Columns', 'Rows', 'Values'})
+        self.assertEqual(roles['Values']['projections'][0]['nativeQueryRef'], 'Sales Value')
+
+    def test_tableau_bar_line_panes_bind_stacked_columns_and_line_measure(self):
+        self.gen._field_map.update({
+            'Week date': ('Sales', 'Week date'),
+            'AV + UZB, %': ('Sales', 'AV + UZB, %'),
+            'Delivery count': ('Sales', 'Delivery count'),
+            'Is Uzb': ('Sales', 'Is Uzb'),
+        })
+        self.gen._actual_bim_symbols = {
+            ('Sales', 'Week date'), ('Sales', 'AV + UZB, %'),
+            ('Sales', 'Delivery count'), ('Sales', 'Is Uzb'),
+        }
+        self.gen._actual_bim_measure_names = {'AV + UZB, %', 'Delivery count'}
+        worksheet = {
+            'name': 'AV UZB',
+            'chart_type': 'lineStackedColumnComboChart',
+            'fields': [
+                {'name': 'Week date', 'shelf': 'columns'},
+                {'name': 'Delivery count', 'shelf': 'rows'},
+                {'name': 'AV + UZB, %', 'shelf': 'rows'},
+                {'name': 'Is Uzb', 'shelf': 'color'},
+            ],
+            'mark_panes': [
+                {'mark_class': 'Automatic', 'value_field': 'Delivery count'},
+                {'mark_class': 'Bar', 'value_field': 'AV + UZB, %',
+                 'color_field': 'Is Uzb'},
+            ],
+        }
+
+        query = self.gen._build_visual_query(worksheet)['queryState']
+
+        self.assertEqual(set(query), {'Category', 'Series', 'Y', 'Y2'})
+        self.assertEqual(query['Category']['projections'][0]['nativeQueryRef'], 'Week date')
+        self.assertEqual(query['Series']['projections'][0]['nativeQueryRef'], 'Is Uzb')
+        self.assertEqual(query['Y']['projections'][0]['nativeQueryRef'], 'AV + UZB, %')
+        self.assertEqual(query['Y2']['projections'][0]['nativeQueryRef'], 'Delivery count')
+
+    def test_tableau_av_uzb_pane_roles_use_count_columns_and_percent_line(self):
+        count = 'AV + UZB, #'
+        percent = 'AV + UZB, % (copy)'
+        tableau_count_pane = 'number_of_av_and_uzb_deliveries (copy)_1274800179999715344'
+        tableau_bar_pane = 'AV + UZB, % (copy)_4395724356211630081'
+        self.gen._field_map.update({
+            'Week date': ('Sales', 'Week date'),
+            tableau_count_pane: ('Sales', percent),
+            tableau_bar_pane: ('Sales', count),
+            'Is Uzb': ('Sales', 'Is Uzb'),
+        })
+        self.gen._actual_bim_symbols = {
+            ('Sales', 'Week date'), ('Sales', count),
+            ('Sales', percent), ('Sales', 'Is Uzb'),
+        }
+        self.gen._actual_bim_measure_names = {count, percent}
+        worksheet = {
+            'name': 'AV UZB',
+            'chart_type': 'lineStackedColumnComboChart',
+            'fields': [
+                {'name': 'Week date', 'shelf': 'columns'},
+                {'name': tableau_count_pane, 'shelf': 'rows'},
+                {'name': tableau_bar_pane, 'shelf': 'rows'},
+                {'name': 'Is Uzb', 'shelf': 'color'},
+            ],
+            'mark_panes': [
+                {'mark_class': 'Automatic', 'value_field': tableau_count_pane,
+                 'color_field': ''},
+                {'mark_class': 'Bar', 'value_field': tableau_bar_pane,
+                 'color_field': 'Is Uzb'},
+            ],
+        }
+
+        roles = self.gen._build_visual_query(worksheet)['queryState']
+
+        self.assertEqual(set(roles), {'Category', 'Series', 'Y', 'Y2'})
+        self.assertEqual(roles['Category']['projections'][0]['nativeQueryRef'], 'Week date')
+        self.assertEqual(roles['Series']['projections'][0]['nativeQueryRef'], 'Is Uzb')
+        self.assertEqual(roles['Y']['projections'][0]['nativeQueryRef'], count)
+        self.assertEqual(roles['Y2']['projections'][0]['nativeQueryRef'], percent)
 
     def test_tooltip_uses_unique_model_owner_when_mapping_is_wrong(self):
         self.gen._field_map['Remote Note'] = ('Sales', 'Remote Note')
@@ -1673,6 +1859,36 @@ class TestBuildVisualQuery(unittest.TestCase):
         self.assertIn('Y', qs)
         # Both measures should be in Y projections
         self.assertEqual(len(qs['Y']['projections']), 2)
+
+    def test_table_crosstab_keeps_axes_and_every_measure_value_not_detail_grain(self):
+        self.gen._field_map.update({
+            'Week': ('Sales', 'Week'),
+            'Carrier': ('Sales', 'Carrier'),
+            'Revenue': ('Sales', 'Revenue'),
+            'Profit': ('Sales', 'Profit'),
+        })
+        self.gen._measure_names.update({'Revenue', 'Profit'})
+        self.gen._bim_measure_names.update({'Revenue', 'Profit'})
+        self.gen._actual_bim_symbols = {
+            ('Sales', 'Week'), ('Sales', 'Carrier'),
+            ('Sales', 'Revenue'), ('Sales', 'Profit'),
+        }
+        roles = self._query('tableEx', [
+            {'name': 'Week', 'shelf': 'columns'},
+            {'name': 'Carrier', 'shelf': 'detail'},
+            {'name': 'Revenue', 'shelf': 'measure_value'},
+            {'name': 'Profit', 'shelf': 'measure_value'},
+        ])['queryState']
+        projections = roles['Values']['projections']
+        self.assertEqual(len(projections), 3)
+        self.assertEqual(
+            [next(iter(p['field'])) for p in projections],
+            ['Column', 'Measure', 'Measure'],
+        )
+        self.assertEqual(
+            [p['field'][next(iter(p['field']))]['Property'] for p in projections],
+            ['Week', 'Revenue', 'Profit'],
+        )
 
     def test_all_measures_fallback_to_tableEx(self):
         """Only measures (no dims) in a bar chart → fallback to tableEx."""
@@ -4444,3 +4660,272 @@ class TestCreateMobilePages(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# ─── Date-part filter controls (my:/tmn:) — regression for dropped
+#     "As of EOM" / "Balance Month" / recovery-rate month slicers ──────────
+
+
+class TestDatePartFilterControls(unittest.TestCase):
+    """Tableau date quick-filters use my:/tmn:/qy: prefixes. They used to
+    fall through to the worksheet-name fallback and be silently skipped."""
+
+    def _run(self, tmpdir, obj, calc_map, conv, field_map):
+        gen = _make_generator()
+        _init_field_map(gen, field_map)
+        visuals_dir = os.path.join(tmpdir, 'visuals')
+        os.makedirs(visuals_dir, exist_ok=True)
+        gen._create_visual_filter_control(
+            visuals_dir, obj, 1.0, 1.0, 0, calc_map, conv)
+        return visuals_dir
+
+    def test_my_month_reference_to_physical_column(self):
+        tmpdir = tempfile.mkdtemp()
+        obj = {
+            'type': 'filter_control',
+            'name': 'EOM KPI | Delinquents',
+            'field': 'EOM KPI | Delinquents',
+            'param': '[federated.0jdz3xb136sv1d19m731c0yvf5j0].[my:BALANCE_MONTH:ok]',
+            'calc_column_id': '',
+            'position': {'x': 0, 'y': 0, 'w': 200, 'h': 50},
+        }
+        conv = {'parameters': [], 'datasources': []}
+        fmap = {'BALANCE_MONTH': ('Extract', 'Balance Month')}
+        visuals_dir = self._run(tmpdir, obj, {}, conv, fmap)
+        self.assertTrue(os.listdir(visuals_dir), 'date slicer must be created')
+        vjson = os.path.join(visuals_dir, sorted(os.listdir(visuals_dir))[0], 'visual.json')
+        data = json.load(open(vjson))
+        self.assertEqual(data['visual']['visualType'], 'slicer')
+        proj = (data['visual']['query']['queryState']['Values']['projections'][0]
+                ['field']['Column'])
+        self.assertEqual(proj['Expression']['SourceRef']['Entity'], 'Extract')
+        self.assertEqual(proj['Property'], 'Balance Month')
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_tmn_calc_reference_to_status_entry_month(self):
+        tmpdir = tempfile.mkdtemp()
+        obj = {
+            'type': 'filter_control',
+            'name': 'Default Rec. - Graph',
+            'field': 'Default Rec. - Graph',
+            'param': ('[federated.1ls6k4h0cpi2qy1b8tkqu1gl7elw (copy 3)].'
+                      '[tmn:Calculation_411234995619983361:qk]'),
+            'calc_column_id': '',
+            'position': {'x': 0, 'y': 0, 'w': 200, 'h': 50},
+        }
+        conv = {'parameters': [], 'datasources': []}
+        fmap = {'Status Entry Month': ('Extract', 'Status Entry Month')}
+        calc_map = {'Calculation_411234995619983361': 'Status Entry Month'}
+        visuals_dir = self._run(tmpdir, obj, calc_map, conv, fmap)
+        self.assertTrue(os.listdir(visuals_dir), 'date slicer must be created')
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_date_part_prefix_forces_list_mode_not_between(self):
+        tmpdir = tempfile.mkdtemp()
+        obj = {
+            'type': 'filter_control',
+            'name': 'EOM KPI | Title',
+            'field': 'EOM KPI | Title',
+            'param': '[federated.0jdz3xb136sv1d19m731c0yvf5j0].[my:BALANCE_MONTH:ok]',
+            'calc_column_id': '',
+            'position': {'x': 0, 'y': 0, 'w': 200, 'h': 50},
+        }
+        conv = {'parameters': [], 'datasources': [
+            {'name': 'ds', 'tables': [{'name': 'Extract', 'columns': [
+                {'name': 'BALANCE_MONTH', 'caption': 'Balance Month',
+                 'datatype': 'date', 'cardinality': 500}]}]}]}
+        fmap = {'BALANCE_MONTH': ('Extract', 'Balance Month')}
+        visuals_dir = self._run(tmpdir, obj, {}, conv, fmap)
+        vjson = os.path.join(visuals_dir, sorted(os.listdir(visuals_dir))[0], 'visual.json')
+        data = json.load(open(vjson))
+        mode = (data['visual']['objects'].get('data', [{}])[0].get('properties', {})
+                .get('mode', {}))
+        mode_txt = (mode.get('expr', {}).get('Literal', {}).get('Value', '')
+                    if mode else '')
+        self.assertEqual(mode_txt, "'Dropdown'")
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+    def test_tmn_qk_creates_between_range_on_paired_column(self):
+        """Tableau's second date control (tmn:/qk: = quantitative range)
+        must become a Between slicer bound to the paired EOM column so it
+        stays independent of the single-select Balance Month dropdown."""
+        tmpdir = tempfile.mkdtemp()
+        obj = {
+            'type': 'filter_control',
+            'name': 'EOM KPI | % Defaults Graph',
+            'field': 'EOM KPI | % Defaults Graph',
+            'param': '[federated.0jdz3xb136sv1d19m731c0yvf5j0].[tmn:BALANCE_MONTH:qk]',
+            'calc_column_id': '',
+            'position': {'x': 0, 'y': 0, 'w': 200, 'h': 50},
+        }
+        conv = {'parameters': [], 'datasources': []}
+        fmap = {
+            'BALANCE_MONTH': ('Extract', 'Balance Month'),
+            'LAST_DAY_OF_BALANCE_MONTH': ('Extract', 'Last Day Of Balance Month'),
+        }
+        visuals_dir = self._run(tmpdir, obj, {}, conv, fmap)
+        vjson = os.path.join(visuals_dir, sorted(os.listdir(visuals_dir))[0], 'visual.json')
+        data = json.load(open(vjson))
+        mode = (data['visual']['objects'].get('data', [{}])[0].get('properties', {})
+                .get('mode', {}))
+        mode_txt = (mode.get('expr', {}).get('Literal', {}).get('Value', '')
+                    if mode else '')
+        self.assertEqual(mode_txt, "'Between'")
+        proj = (data['visual']['query']['queryState']['Values']['projections'][0]
+                ['field']['Column'])
+        self.assertEqual(proj['Property'], 'Last Day Of Balance Month')
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_tmn_qk_without_pair_keeps_own_column(self):
+        tmpdir = tempfile.mkdtemp()
+        obj = {
+            'type': 'filter_control',
+            'name': 'Sheet',
+            'field': 'Sheet',
+            'param': '[ds].[tmn:REPORT_MONTH:qk]',
+            'calc_column_id': '',
+            'position': {'x': 0, 'y': 0, 'w': 200, 'h': 50},
+        }
+        conv = {'parameters': [], 'datasources': []}
+        fmap = {'REPORT_MONTH': ('Custom SQL Query', 'Report Month')}
+        visuals_dir = self._run(tmpdir, obj, {}, conv, fmap)
+        vjson = os.path.join(visuals_dir, sorted(os.listdir(visuals_dir))[0], 'visual.json')
+        data = json.load(open(vjson))
+        proj = (data['visual']['query']['queryState']['Values']['projections'][0]
+                ['field']['Column'])
+        self.assertEqual(proj['Property'], 'Report Month')
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ─── Worksheet-scoped date filters → page.json visualInteractions ───────
+
+
+class TestWorksheetScopedInteractions(unittest.TestCase):
+    """Tableau quick filters apply per-worksheet; PBI slicers filter the whole
+    page. The dashboard builder must write NoFilter visualInteractions so
+    each date selector only affects its own worksheets."""
+
+    def test_page_interactions_written_for_date_controls(self):
+        gen = _make_generator()
+        _init_field_map(gen, {
+            'BALANCE_MONTH': ('Extract', 'Balance Month'),
+            'LAST_DAY_OF_BALANCE_MONTH': ('Extract', 'Last Day Of Balance Month'),
+        })
+        tmpdir = tempfile.mkdtemp()
+        pages_dir = os.path.join(tmpdir, 'pages')
+        os.makedirs(pages_dir, exist_ok=True)
+
+        page_name = 'ReportSection'
+        page_dir = os.path.join(pages_dir, page_name)
+        visuals_dir = os.path.join(page_dir, 'visuals')
+        os.makedirs(visuals_dir, exist_ok=True)
+        _write_json(os.path.join(page_dir, 'page.json'), {
+            '$schema': 'x', 'name': page_name, 'displayName': 'EOM KPI',
+        })
+
+        worksheets = [
+            {'name': 'EOM KPI | Delinquents', 'chart_type': 'table',
+             'filters': [{'field': 'my:BALANCE_MONTH', 'type': 'categorical',
+                          'values': ['202610'], 'date_part': None}]},
+            {'name': 'EOM KPI | % Defaults Graph', 'chart_type': 'line',
+             'filters': [{'field': 'BALANCE_MONTH', 'type': '',
+                          'date_part': 'tmn'}]},
+        ]
+        dashboards = [{
+            'name': 'Defaults EOM KPI',
+            'size': {'width': 1200, 'height': 800},
+            'objects': [
+                {'type': 'worksheetReference', 'worksheetName': 'EOM KPI | Delinquents',
+                 'position': {'x': 0, 'y': 0, 'w': 400, 'h': 300}},
+                {'type': 'worksheetReference', 'worksheetName': 'EOM KPI | % Defaults Graph',
+                 'position': {'x': 0, 'y': 400, 'w': 400, 'h': 300}},
+                {'type': 'filter_control', 'name': 'EOM KPI | Delinquents',
+                 'field': 'EOM KPI | Delinquents',
+                 'param': '[ds].[my:BALANCE_MONTH:ok]', 'calc_column_id': '',
+                 'position': {'x': 500, 'y': 0, 'w': 150, 'h': 60}},
+                {'type': 'filter_control', 'name': 'EOM KPI | % Defaults Graph',
+                 'field': 'EOM KPI | % Defaults Graph',
+                 'param': '[ds].[tmn:BALANCE_MONTH:qk]', 'calc_column_id': '',
+                 'position': {'x': 500, 'y': 400, 'w': 150, 'h': 60}},
+            ],
+        }]
+        converted = {'calculations': [], 'filters': [], 'parameters': [],
+                     'actions': [], 'datasources': []}
+        gen._create_dashboard_pages(pages_dir, dashboards, worksheets,
+                                    converted, {})
+        page = json.load(open(os.path.join(page_dir, 'page.json')))
+        vi = page.get('visualInteractions', [])
+        self.assertTrue(vi, 'interactions must be written')
+        # dropdown must not filter the graph; range must not filter the table
+        pairs = {(i['source'], i['target']) for i in vi}
+        self.assertTrue(all(i['type'] == 'NoFilter' for i in vi))
+        # both directions between the two date selector groups exist
+        src_count = len({i['source'] for i in vi})
+        self.assertEqual(src_count, 2)
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ─── Date parameters with "any" domain get selectable What-If tables ────
+
+
+class TestDateParameterControl(unittest.TestCase):
+    """Two Periods page: Current/Previous Period pickers used to vanish
+    because domain-less date parameters became constant measures."""
+
+    def test_parameter_control_slicer_created_for_date_param(self):
+        gen = _make_generator()
+        _init_field_map(gen, {})
+        gen._actual_bim_symbols = {('Previous Period', 'Value')}
+        tmpdir = tempfile.mkdtemp()
+        visuals_dir = os.path.join(tmpdir, 'visuals')
+        os.makedirs(visuals_dir, exist_ok=True)
+        obj = {
+            'type': 'parameter_control',
+            'name': 'param_Parameter 1',
+            'param': '[Parameters].[Parameter 1]',
+            'param_name': 'Parameter 1',
+            'position': {'x': 0, 'y': 0, 'w': 200, 'h': 50},
+        }
+        conv = {'parameters': [{'name': '[Parameter 1]',
+                                'caption': 'Previous Period'}]}
+        gen._create_visual_parameter_control(
+            visuals_dir, obj, 1.0, 1.0, 0, conv)
+        subdirs = os.listdir(visuals_dir)
+        self.assertTrue(subdirs, 'parameter selector must be created')
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestDateParameterTableCreation(unittest.TestCase):
+    """_create_parameter_tables: date+any parameters → CALENDAR table."""
+
+    def _model(self):
+        return {"model": {"tables": [{"name": "Main", "columns": [],
+                                      "measures": []}]}}
+
+    def test_date_any_parameter_creates_calendar_table(self):
+        from powerbi_import.tmdl_parameters import _create_parameter_tables
+        model = self._model()
+        params = [{'name': '[Parameter 1]', 'caption': 'Previous Period',
+                   'datatype': 'date', 'value': '#2026-04-30#',
+                   'domain_type': 'any', 'allowable_values': []}]
+        _create_parameter_tables(model, params, 'Main')
+        names = [t['name'] for t in model['model']['tables']]
+        self.assertIn('Previous Period', names)
+        table = next(t for t in model['model']['tables']
+                     if t['name'] == 'Previous Period')
+        self.assertEqual(table['columns'][0]['dataType'], 'dateTime')
+        part = table['partitions'][0]
+        self.assertEqual(part['source']['type'], 'm')
+        self.assertIn('List.Dates', part['source']['expression'])
+
+    def test_date_any_parameter_moves_measure_off_main_table(self):
+        from powerbi_import.tmdl_parameters import _create_parameter_tables
+        model = self._model()
+        params = [{'name': '[Parameter 1]', 'caption': 'Previous Period',
+                   'datatype': 'date', 'value': '#2026-04-30#',
+                   'domain_type': 'any', 'allowable_values': []}]
+        _create_parameter_tables(model, params, 'Main')
+        main = model['model']['tables'][0]
+        main_measure_names = [m['name'] for m in main.get('measures', [])]
+        self.assertNotIn('Previous Period', main_measure_names)

@@ -342,7 +342,7 @@ TWB-embedded transforms (column renames from captions) are auto-detected and inj
 | Tableau Mark | Power BI visualType | Notes |
 |-------------|-------------------|-------|
 | Bar | clusteredBarChart | Standard bar |
-| Stacked Bar | stackedBarChart | |
+| Stacked Bar | barChart | Built-in stacked bar; vertical orientation uses columnChart |
 | Line | lineChart | With markers |
 | Area | areaChart | |
 | Pie | pieChart | |

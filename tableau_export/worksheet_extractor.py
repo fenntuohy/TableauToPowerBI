@@ -44,8 +44,10 @@ def _clean_datasource_field_ref(raw):
 
 def _tableau_identifier(raw):
     """Decode a standalone Tableau identifier, including escaped brackets."""
-    groups = extract_bracketed_groups(raw or '')
-    value = groups[0] if groups else (raw or '').strip('[]')
+    value = raw or ''
+    groups = extract_bracketed_groups(value) if value.startswith('[') else []
+    if groups:
+        value = groups[0]
     return value.replace('\\#', '#')
 
 
@@ -256,10 +258,11 @@ def extract_worksheet_fields(worksheet):
                 continue
             for member in filter_elem.findall('.//groupfilter[@function="member"]'):
                 value = member.get('member', '').strip('"').replace('\\#', '#')
-                refs = _extract_datasource_field_refs(value)
-                if not refs:
+                groups = extract_bracketed_groups(value)
+                if len(groups) < 2:
                     continue
-                _ds, field_ref, instance_ref = refs[0]
+                field_ref = groups[1]
+                instance_ref = field_ref
                 match = re.match(r'^(?:usr|sum|avg|count|cnt|countd|min|max|attr):(.+)$', field_ref)
                 if match:
                     field_ref = match.group(1)

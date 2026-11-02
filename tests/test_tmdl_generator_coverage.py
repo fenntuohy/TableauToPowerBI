@@ -44,6 +44,7 @@ from powerbi_import.tmdl_generator import (
     _apply_hierarchies,
     _fix_relationship_type_mismatches,
     _create_quick_table_calc_measures,
+    _create_measure_rows_table,
     _build_table,
     _write_column,
     _write_column_properties,
@@ -895,6 +896,95 @@ class TestCreateQuickTableCalcMeasures(unittest.TestCase):
         self.assertIn("DIVIDE", m["expression"])
         self.assertIn("ALL", m["expression"])
         self.assertEqual(m["formatString"], "0.00%")
+
+    def test_measure_names_crosstab_builds_filtered_measure_rows_table(self):
+        model = {'model': {'tables': [{
+            'name': 'Sales', 'columns': [{'name': 'Week', 'dataType': 'dateTime'}], 'measures': [
+                {'name': 'Revenue', 'expression': 'SUM(Sales[Amount])', 'formatString': '#,0'},
+                {'name': 'Profit %', 'expression': 'DIVIDE([Profit], [Revenue])', 'formatString': '0.0%'},
+            ], 'partitions': [],
+        }]}}
+        model['_main_table_name'] = 'Sales'
+        worksheets = [{
+            'name': '3PL Perfornance - On Time',
+            'formatting': {'header': {'total-label': 'AVG'},
+                           'field_formats': {'[DS].[usr:Profit %:qk]': 'p0.0%'}},
+            'fields': [
+                {'name': 'Week', 'shelf': 'columns'},
+                {'name': ':Measure Names', 'shelf': 'rows'},
+                {'name': 'Revenue', 'shelf': 'measure_value', 'datasource': 'DS'},
+                {'name': 'Profit %', 'shelf': 'measure_value', 'datasource': 'DS'},
+            ],
+        }]
+
+        _create_measure_rows_table(
+            model, worksheets, [{'name': 'DS', 'calculations': [
+                {'name': '[Revenue]', 'caption': 'Revenue'},
+                {'name': '[Profit %]', 'caption': 'Profit %'},
+            ]}], 'Sales')
+
+        label_table = next(t for t in model['model']['tables']
+                           if t['name'] == 'Tableau Measure Rows')
+        self.assertIn('Measure = text', label_table['partitions'][0]['source']['expression'])
+        selector = next(m for m in model['model']['tables'][0]['measures']
+                        if m['name'] == 'Tableau Measure Rows Value')
+        self.assertIn('VAR _cell = SWITCH', selector['expression'])
+        self.assertIn('AVERAGEX(VALUES(\'Sales\'[Week])', selector['expression'])
+        self.assertIn('IF(_aggregation = "AVG"', selector['expression'])
+        self.assertIn('SUMX(VALUES(\'Sales\'[Week])', selector['expression'])
+        self.assertIn('ISINSCOPE(\'Sales\'[Week])', selector['expression'])
+        config = model['_measure_rows_config']['worksheets']['3PL Perfornance - On Time']
+        self.assertEqual([row['label'] for row in config], ['Revenue', 'Profit %'])
+        self.assertTrue(all(row['measure']['total'] == 'AVG' for row in config))
+
+    def test_measure_names_crosstab_missing_total_label_defaults_to_avg(self):
+        model = {'model': {'tables': [{
+            'name': 'Sales',
+            'columns': [{'name': 'Week', 'dataType': 'dateTime'}],
+            'measures': [{'name': 'Revenue', 'expression': 'SUM(Sales[Amount])'}],
+            'partitions': [],
+        }]}, '_main_table_name': 'Sales'}
+        worksheet = {
+            'name': 'PDD adjusted Target',
+            'fields': [
+                {'name': 'Week', 'shelf': 'columns'},
+                {'name': ':Measure Names', 'shelf': 'rows'},
+                {'name': 'Revenue', 'shelf': 'measure_value'},
+            ],
+        }
+
+        _create_measure_rows_table(model, [worksheet], [], 'Sales')
+
+        selector = next(m for m in model['model']['tables'][0]['measures']
+                        if m['name'] == 'Tableau Measure Rows Value')
+        self.assertIn('AVERAGEX(VALUES(\'Sales\'[Week])', selector['expression'])
+        self.assertEqual(
+            model['_measure_rows_config']['worksheets']['PDD adjusted Target'][0]['measure']['total'],
+            'AVG',
+        )
+
+    def test_measure_names_crosstab_defaults_missing_total_label_to_avg(self):
+        model = {'model': {'tables': [{
+            'name': 'Sales',
+            'columns': [{'name': 'Week', 'dataType': 'dateTime'}],
+            'measures': [{'name': 'Revenue', 'expression': 'SUM(Sales[Amount])'}],
+            'partitions': [],
+        }]}, '_main_table_name': 'Sales'}
+        worksheet = {
+            'name': 'PDD adjusted Target',
+            'fields': [
+                {'name': 'Week', 'shelf': 'columns'},
+                {'name': ':Measure Names', 'shelf': 'rows'},
+                {'name': 'Revenue', 'shelf': 'measure_value'},
+            ],
+        }
+
+        _create_measure_rows_table(model, [worksheet], [], 'Sales')
+
+        selector = next(m for m in model['model']['tables'][0]['measures']
+                        if m['name'] == 'Tableau Measure Rows Value')
+        self.assertIn('AVERAGEX(VALUES(\'Sales\'[Week])', selector['expression'])
+        self.assertNotIn('"", AVERAGEX', selector['expression'])
 
     def test_pcto_virtual_number_of_records_counts_rows(self):
         model, ws = self._make_model_and_ws('pcto')
@@ -2082,3 +2172,82 @@ class TestWrapDateSubtractionInDurationDays(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# ─── Parameter-dispatched date columns: static twin for date slicers ────
+
+
+class TestParameterDispatchedDateColumns(unittest.TestCase):
+    """Tableau "Status Entry Month" CASE picks between physical date columns
+    via a parameter. The measure stays dynamic, but a static calculated
+    column twin must be emitted so date quick-filters (my:/tmn:) can bind."""
+
+    def _calc(self):
+        return {
+            'name': '[Calculation_411234995619983361]',
+            'caption': 'Status Entry Month',
+            'formula': ("CASE [Parameters].[Parameter 3]\n"
+                        "WHEN 'SPV Category' THEN [STATUS_SPV_CATEGORY_DEFAULT_ENTRY_MONTH]\n"
+                        "WHEN '180 DPD' THEN [STATUS_180_DPD_DEFAULT_ENTRY_MONTH]\n"
+                        "WHEN '120 DPD' THEN [STATUS_120_DPD_DEFAULT_ENTRY_MONTH]\n"
+                        "END"),
+            'role': 'measure',
+            'datatype': 'date',
+            'datasource_name': 'ds1',
+        }
+
+    def _run(self, calc):
+        from powerbi_import.tmdl_generator import _build_table
+        columns = [
+            {'name': 'STATUS_SPV_CATEGORY_DEFAULT_ENTRY_MONTH', 'datatype': 'date'},
+            {'name': 'STATUS_180_DPD_DEFAULT_ENTRY_MONTH', 'datatype': 'date'},
+            {'name': 'STATUS_120_DPD_DEFAULT_ENTRY_MONTH', 'datatype': 'date'},
+        ]
+        table = {'name': 'Recovery', 'columns': columns}
+        connection = {'type': 'snowflake', 'server': 's', 'database': 'd'}
+        dax_context = {
+            'calc_map': {}, 'param_map': {'Parameter 3': 'Select Default Definition'},
+            'column_table_map': {
+                'STATUS_SPV_CATEGORY_DEFAULT_ENTRY_MONTH': 'Recovery',
+                'STATUS_180_DPD_DEFAULT_ENTRY_MONTH': 'Recovery',
+                'STATUS_120_DPD_DEFAULT_ENTRY_MONTH': 'Recovery',
+            },
+            'measure_names': set(), 'param_values': {},
+        }
+        meta = {c['name']: {'datatype': 'date'} for c in columns}
+        return _build_table(table, connection, [calc], [],
+                            dax_context=dax_context, col_metadata_map=meta)
+
+    def test_emits_static_date_column_twin(self):
+        result = self._run(self._calc())
+        col = next((c for c in result['columns']
+                    if c['name'] == 'Status Entry Month'), None)
+        self.assertIsNotNone(col, 'static twin column must exist')
+        self.assertIn(col['dataType'].lower(), ('datetime', 'date'))
+        self.assertTrue(col.get('expression') or col.get('sourceColumn'))
+
+    def test_measure_still_emitted_with_selectedvalue(self):
+        result = self._run(self._calc())
+        meas = [m for m in result['measures']
+                if m['name'] == 'Status Entry Month']
+        self.assertTrue(meas, 'dynamic measure must still exist')
+
+    def test_no_twin_when_branches_are_not_dates(self):
+        calc = self._calc()
+        calc['formula'] = ("CASE [Parameters].[Parameter 3]\n"
+                           "WHEN 'A' THEN [CAT_A]\nWHEN 'B' THEN [CAT_B]\nEND")
+        calc['datatype'] = 'string'
+        from powerbi_import.tmdl_generator import _build_table
+        columns = [{'name': 'CAT_A', 'datatype': 'string'},
+                   {'name': 'CAT_B', 'datatype': 'string'}]
+        table = {'name': 'Recovery', 'columns': columns}
+        dax_context = {
+            'calc_map': {}, 'param_map': {'Parameter 3': 'Select Default Definition'},
+            'column_table_map': {'CAT_A': 'Recovery', 'CAT_B': 'Recovery'},
+            'measure_names': set(), 'param_values': {},
+        }
+        result = _build_table(table, {'type': 'csv'}, [calc], [],
+                              dax_context=dax_context, col_metadata_map={})
+        col = next((c for c in result['columns']
+                    if c['name'] == 'Status Entry Month'), None)
+        self.assertIsNone(col, 'no static twin for non-date branches')

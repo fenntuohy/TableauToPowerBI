@@ -36,6 +36,12 @@ class DualAxisBuilder:
         elif isinstance(axes, list) and len(axes) > 1:
             return True
 
+        panes = worksheet.get("mark_panes", []) or []
+        axis_values = {pane.get("value_field") for pane in panes
+                       if pane.get("value_field")}
+        if len(axis_values) > 1:
+            return True
+
         # Multiple Measure Values are common in Tableau text tables and
         # ordinary charts. They do not imply two y axes; require explicit
         # dual-axis metadata or pane-level axes before promoting to a combo.

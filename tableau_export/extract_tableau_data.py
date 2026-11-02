@@ -95,6 +95,7 @@ from chart_type_inference import (  # noqa: E402,F401
     _CARD_MARK_CLASSES,
     _extract_mark_class,
     extract_mark_classes,
+    extract_mark_panes,
     determine_chart_type,
     _shelfless_marks_card_type,
     _detect_bar_orientation,
@@ -407,6 +408,7 @@ class TableauExtractor:
                 'chart_type': self.determine_chart_type(worksheet),
                 'original_mark_class': self._extract_mark_class(worksheet),
                 'mark_classes': extract_mark_classes(worksheet),
+                'mark_panes': extract_mark_panes(worksheet),
                 'fields': self.extract_worksheet_fields(worksheet),
                 'filters': self.extract_worksheet_filters(worksheet),
                 'formatting': self.extract_formatting(worksheet),
@@ -963,6 +965,9 @@ class TableauExtractor:
     def extract_mark_classes(self, worksheet):
         return extract_mark_classes(worksheet)
 
+    def extract_mark_panes(self, worksheet):
+        return extract_mark_panes(worksheet)
+
     def determine_chart_type(self, worksheet):
         return determine_chart_type(worksheet)
 
@@ -1346,9 +1351,14 @@ class TableauExtractor:
                 'continuous': is_continuous,
             }
         
-        # Detect dual axis: multiple y-axis definitions or sync flag
+        # Tableau also records independent axes on pane y-axis-name attributes.
+        # These panes can represent combo overlays even without <axis> nodes.
         y_axes = [a for a in axis_elements if a.get('type') == 'y']
-        if len(y_axes) > 1:
+        pane_y_axes = list(dict.fromkeys(
+            pane.get('y-axis-name') for pane in worksheet.findall('.//pane')
+            if pane.get('y-axis-name')
+        ))
+        if len(y_axes) > 1 or len(pane_y_axes) > 1:
             axes['dual_axis'] = True
             # Check for synchronized dual axis (range synced)
             axes['dual_axis_sync'] = any(a.get('synchronized', 'false') == 'true' for a in y_axes)
@@ -2799,7 +2809,7 @@ class TableauExtractor:
             return ''
         runs = title_el.findall('.//run')
         if runs:
-            text = ''.join(r.text or '' for r in runs).strip()
+            text = ''.join(_clean_tableau_run_text(r) for r in runs).strip()
             # Strip stray Tableau formatting artifacts (e.g. trailing Æ)
             text = text.rstrip('\u00c6\u00a0')
             if text:

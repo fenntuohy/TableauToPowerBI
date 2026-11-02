@@ -162,6 +162,7 @@ _MAPPED_CHART_TYPES = frozenset({
     "stackedareachart", "stacked-area", "100stackedareachart",
     "sparkline",
     "combo", "combochart", "linecolumnchart", "lineclusteredcolumncombochart",
+    "linestackedcolumncombochart",
     "piechart", "pie", "donutchart", "donut", "funnel", "funnelchart",
     "semicircle", "ring",
     "scatter", "scatterplot", "scatterchart", "bubble", "bubblechart",
@@ -179,8 +180,10 @@ _MAPPED_CHART_TYPES = frozenset({
     "gantt", "timeline",
     "wordcloud", "tagcloud",
     # Power BI native chart type names (may appear verbatim)
-    "clusteredbarchart", "stackedbarchart", "clusteredcolumnchart",
-    "stackedcolumnchart", "linechart", "areachart", "piechart",
+    "clusteredbarchart", "stackedbarchart",
+    "clusteredcolumnchart", "stackedcolumnchart",
+    "barchart", "columnchart", "linestackedcolumncombochart",
+    "linechart", "areachart", "piechart",
     "donutchart", "funnelchart", "scatterchart",
 })
 

@@ -62,16 +62,16 @@ VISUAL_TYPE_MAP = {
     # ── Bar charts ────────────────────────────────────────────
     "barchart": "clusteredBarChart",
     "bar": "clusteredBarChart",
-    "stackedbarchart": "stackedBarChart",
-    "stacked-bar": "stackedBarChart",
+    "stackedbarchart": "barChart",
+    "stacked-bar": "barChart",
     "100stackedbarchart": "hundredPercentStackedBarChart",
     "100-stacked-bar": "hundredPercentStackedBarChart",
 
     # ── Column charts ─────────────────────────────────────────
     "columnchart": "clusteredColumnChart",
     "column": "clusteredColumnChart",
-    "stackedcolumnchart": "stackedColumnChart",
-    "stacked-column": "stackedColumnChart",
+    "stackedcolumnchart": "columnChart",
+    "stacked-column": "columnChart",
     "100stackedcolumnchart": "hundredPercentStackedColumnChart",
     "100-stacked-column": "hundredPercentStackedColumnChart",
     "histogram": "clusteredColumnChart",
@@ -195,7 +195,7 @@ VISUAL_TYPE_MAP = {
     "word-cloud": "wordCloud",
     "ribbonchart": "ribbonChart",
     "ribbon": "ribbonChart",
-    "mekko": "stackedBarChart",
+    "mekko": "barChart",
     "sankey": "sankeyDiagram",
     "chord": "chordChart",
     "network": "networkNavigator",
@@ -215,9 +215,9 @@ VISUAL_TYPE_MAP = {
 
     # ── PBI pass-through (already correct) ─────────────────
     "clusteredbarchart": "clusteredBarChart",
-    "stackedbarchart": "stackedBarChart",
+    "stackedbarchart": "barChart",
     "clusteredcolumnchart": "clusteredColumnChart",
-    "stackedcolumnchart": "stackedColumnChart",
+    "stackedcolumnchart": "columnChart",
     "piechart": "pieChart",
     "areachart": "areaChart",
     "stackedareachart": "stackedAreaChart",
@@ -1509,10 +1509,10 @@ VISUAL_DATA_ROLES = {
     "multiRowCard":                      ([], ["Values"]),
     "kpi":                               ([], ["Indicator", "TrendAxis"]),
     "clusteredBarChart":                 (["Category", "Series", "Tooltips"], ["Y"]),
-    "stackedBarChart":                   (["Category", "Series"], ["Y"]),
+    "barChart":                          (["Category", "Series", "Tooltips"], ["Y"]),
     "hundredPercentStackedBarChart":     (["Category", "Series"], ["Y"]),
     "clusteredColumnChart":              (["Category", "Series", "Tooltips"], ["Y"]),
-    "stackedColumnChart":                (["Category", "Series"], ["Y"]),
+    "columnChart":                       (["Category", "Series", "Tooltips"], ["Y"]),
     "hundredPercentStackedColumnChart":  (["Category", "Series"], ["Y"]),
     "lineChart":                         (["Category", "Series", "Tooltips"], ["Y"]),
     "areaChart":                         (["Category", "Series", "Tooltips"], ["Y"]),
@@ -1580,7 +1580,7 @@ def _get_config_template(visual_type):
                 "dataPoint": [{"properties": {"showAllDataPoints": _L("true")}}],
             },
         },
-        "stackedBarChart": {
+        "barChart": {
             "objects": {
                 "categoryAxis": [{"properties": {"show": _L("true")}}],
                 "valueAxis": [{"properties": {"show": _L("true")}}],
@@ -1601,7 +1601,7 @@ def _get_config_template(visual_type):
                 "dataPoint": [{"properties": {"showAllDataPoints": _L("true")}}],
             },
         },
-        "stackedColumnChart": {
+        "columnChart": {
             "objects": {
                 "categoryAxis": [{"properties": {"show": _L("true")}}],
                 "valueAxis": [{"properties": {"show": _L("true")}}],
@@ -1803,7 +1803,7 @@ _AGG_FUNC_MAP = {
 # can be attached to the generated visual.
 
 APPROXIMATION_MAP = {
-    "mekko":       ("stackedBarChart",                   "Mekko chart mapped to Stacked Bar — variable-width bars are not supported"),
+    "mekko":       ("barChart",                          "Mekko chart mapped to Stacked Bar — variable-width bars are not supported"),
     "sankey":      ("sankeyDiagram",                     "Sankey diagram mapped to custom visual (ChicagoITSankey1.1.0) — install from AppSource"),
     "chord":       ("chordChart",                        "Chord diagram mapped to custom visual (ChicagoITChord1.0.0) — install from AppSource"),
     "network":     ("networkNavigator",                  "Network graph mapped to custom visual (NetworkNavigator1.0.0) — install from AppSource"),
@@ -1897,12 +1897,12 @@ VISUAL_FALLBACK_CASCADE = {
     # Complex visuals → simpler alternatives
     'scatterChart':                      'tableEx',
     'lineClusteredColumnComboChart':     'clusteredBarChart',
-    'lineStackedColumnComboChart':       'stackedBarChart',
+    'lineStackedColumnComboChart':       'barChart',
     'boxAndWhisker':                     'clusteredColumnChart',
     'bulletChart':                       'clusteredBarChart',
     'decompositionTree':                 'tableEx',
     'waterfallChart':                    'clusteredColumnChart',
-    'ribbonChart':                       'stackedBarChart',
+    'ribbonChart':                       'barChart',
     'sunburst':                          'treemap',
     'treemap':                           'tableEx',
     'funnel':                            'clusteredBarChart',
@@ -1915,9 +1915,9 @@ VISUAL_FALLBACK_CASCADE = {
     'multiRowCard':                      'card',
     # Simple visuals → table as last resort
     'clusteredBarChart':                 'tableEx',
-    'stackedBarChart':                   'tableEx',
+    'barChart':                          'tableEx',
     'clusteredColumnChart':              'tableEx',
-    'stackedColumnChart':                'tableEx',
+    'columnChart':                       'tableEx',
     'lineChart':                         'tableEx',
     'areaChart':                         'tableEx',
     'pieChart':                          'tableEx',
@@ -2011,8 +2011,8 @@ def _apply_visual_fallback(pbi_type, has_dimensions, has_measures, source_type='
 # ═══════════════════════════════════════════════════════════════════
 
 SMALL_MULTIPLES_TYPES = {
-    'clusteredBarChart', 'stackedBarChart', 'hundredPercentStackedBarChart',
-    'clusteredColumnChart', 'stackedColumnChart', 'hundredPercentStackedColumnChart',
+    'clusteredBarChart', 'barChart', 'hundredPercentStackedBarChart',
+    'clusteredColumnChart', 'columnChart', 'hundredPercentStackedColumnChart',
     'lineChart', 'areaChart', 'stackedAreaChart', 'hundredPercentStackedAreaChart',
     'lineStackedColumnComboChart', 'lineClusteredColumnComboChart',
 }
