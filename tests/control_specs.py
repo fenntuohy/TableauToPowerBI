@@ -138,8 +138,8 @@ CONTROLS = [
     {
         "name": "--validate-data stops being acted on",
         "file": "migrate.py",
-        "old": "        _run_data_validation(args, source_basename)",
-        "new": "        pass",
+        "old": "        equivalence = _run_data_validation(args, source_basename)",
+        "new": "        equivalence = None",
         "test": "tests/test_data_validation.py",
     },
 

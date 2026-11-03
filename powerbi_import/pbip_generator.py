@@ -404,6 +404,34 @@ def _filter_literal(v, date_part_prefix='', boundary='min'):
     return f"'{v_str.replace(chr(39), chr(39) * 2)}'"
 
 
+def _converter_provenance() -> dict:
+    """Commit, branch and dirty state of the converter repo that is running.
+
+    Outputs are only reproducible from a commit when the tree was clean, so
+    ``converter_dirty`` is recorded alongside the commit. Returns ``unknown``
+    values when git is unavailable (for example in an sdist).
+    """
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _git(*args):
+        try:
+            out = subprocess.run(['git', *args], cwd=root, capture_output=True,
+                                 text=True, timeout=5)
+            return out.stdout.strip() if out.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    commit = _git('rev-parse', '--short', 'HEAD')
+    branch = _git('branch', '--show-current')
+    status = _git('status', '--porcelain', '--untracked-files=no')
+    return {
+        'converter_commit': commit or 'unknown',
+        'converter_branch': branch or 'unknown',
+        'converter_dirty': bool(status) if status is not None else None,
+    }
+
+
 class PowerBIProjectGenerator:
     """Generates Power BI Project (.pbip) files"""
     
@@ -6981,6 +7009,16 @@ class PowerBIProjectGenerator:
                 for item in converted_objects.get("hyper_files", [])
             ],
             "dax_measure_names": sorted(getattr(self, '_bim_measure_names', set())),
+            # Which converter produced this output (see docs/VENDOR-PROVENANCE.md).
+            **_converter_provenance(),
+            # Source calc captions, so the loss check can tell a source calc
+            # (a Table.AddColumn that is a calc) from a generated helper column.
+            "calc_captions": sorted({
+                str(c.get('caption') or c.get('name', '')).strip()
+                for ds in converted_objects.get('datasources', [])
+                for c in ds.get('calculations', [])
+                if str(c.get('caption') or c.get('name', '')).strip()
+            }),
             "visual_type_mappings": visual_types_used,
             "visual_details": visual_details,
             "approximations": approximations,
