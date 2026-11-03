@@ -148,6 +148,10 @@ def migrate_workbook(twb_path: str, out_dir: str) -> str:
         cmd = [
             sys.executable, os.path.join(_REPO_ROOT, "migrate.py"),
             "--batch", source_dir, "--output-dir", out_dir, "--quiet",
+            # The harness snapshots visuals of whatever is generated. A workbook
+            # with known object loss must still produce output to snapshot; the
+            # loss gate is a user-facing policy, not a fixture concern.
+            "--no-loss-check",
         ]
         subprocess.run(cmd, cwd=_REPO_ROOT, check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

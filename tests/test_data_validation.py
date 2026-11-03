@@ -194,7 +194,7 @@ class TestFlagWiring(unittest.TestCase):
         source = inspect.getsource(self.migrate)
         self.assertRegex(
             source,
-            r"getattr\(args, 'validate_data', False\)[^\n]*\n[^\n]*\n\s+_run_data_validation\(args",
+            r"getattr\(args, 'validate_data', False\)[^\n]*\n[^\n]*\n\s+(?:\w+\s*=\s*)?_run_data_validation\(args",
             "--validate-data is never acted on")
 
     def test_a_missing_project_is_skipped_not_fatal(self):
