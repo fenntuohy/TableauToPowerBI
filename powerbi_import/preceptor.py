@@ -125,6 +125,10 @@ class ReviewScorecard:
         return sum(self.scores.values()) / len(self.scores)
 
     def passed(self):
+        # A single dimension scored 1 is a hard failure: an average over five
+        # good dimensions must not mask a broken one.
+        if any(v <= 1 for v in self.scores.values()):
+            return False
         return self.average() >= MIN_PASS_SCORE
 
     def to_dict(self):
@@ -522,6 +526,7 @@ def _review_dax_correctness(pbip_path, extraction_data):
 
     leak_count = 0
     paren_errors = 0
+    stub_count = 0
     total_formulas = 0
 
     if sm_dir.exists():
@@ -530,6 +535,10 @@ def _review_dax_correctness(pbip_path, extraction_data):
                 content = tmdl_file.read_text(encoding='utf-8')
             except OSError:
                 continue
+
+            # Conversion-failure stubs are valid DAX (BLANK()), so the syntax
+            # checks below would pass them. Count them as errors explicitly.
+            stub_count += content.count('DAX conversion failed')
 
             # Extract DAX expressions from genuine measure/column sites only.
             for expr in _iter_dax_expressions(content):
@@ -571,9 +580,13 @@ def _review_dax_correctness(pbip_path, extraction_data):
         penalties += min(3, leak_count)  # Max 3 penalty for leaks
     if paren_errors > 0:
         penalties += min(2, paren_errors)
+    if stub_count > 0:
+        # Each BLANK() stub is an untranslated KPI. Any stub forces a fail.
+        penalties += 5
 
     score = max(1, 5 - penalties)
-    detail = f"{total_formulas} formulas, {leak_count} leaks, {paren_errors} paren errors"
+    detail = (f"{total_formulas} formulas, {leak_count} leaks, "
+              f"{paren_errors} paren errors, {stub_count} conversion stubs")
 
     for item in coaching:
         item.score = score
@@ -1159,6 +1172,8 @@ class PreceptorLoop:
                 for item in coaching_items:
                     cycle.add_coaching(item)
 
+            _apply_equivalence_result(cycle.scorecard, pbip_path)
+
             report.add_cycle(cycle)
 
             if cycle.scorecard.passed():
@@ -1194,6 +1209,34 @@ class PreceptorLoop:
         logger.warning("Preceptorship ESCALATED for %s: %s",
                         report_name, report.escalation_reason)
         return report
+
+
+# ── Data-equivalence feedback ────────────────────────────────────
+
+EQUIVALENCE_FILE = 'data_validation.json'
+
+
+def _apply_equivalence_result(scorecard, pbip_path):
+    """Lower the scorecard when the data-equivalence run failed.
+
+    ``migrate.py --validate-data`` writes ``data_validation.json`` next to the
+    project. A ``fail`` status (fidelity < 80%) caps completeness and
+    visual_equivalence at 1, which forces the hard floor in ``passed()``.
+    A missing file means equivalence did not run, so the score is unchanged.
+    """
+    path = Path(pbip_path) / EQUIVALENCE_FILE
+    if not path.is_file():
+        return
+    try:
+        result = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return
+    if result.get('status') != 'fail':
+        return
+    detail = (f"data equivalence failed: fidelity "
+              f"{result.get('fidelity_percent', 0):.1f}% (floor 80%)")
+    for dim in ('completeness', 'visual_equivalence'):
+        scorecard.set_score(dim, 1, detail)
 
 
 # ── Convenience function ─────────────────────────────────────────

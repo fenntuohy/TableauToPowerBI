@@ -1550,6 +1550,7 @@ def _migrate_single_workbook(tableau_file, basename, workbook_output_dir, displa
     if file_results.get('generation') and not tableau_file.lower().endswith('.twbx'):
         project_dir = os.path.join(workbook_output_dir, basename)
         _fix_twb_data_folder(project_dir, basename)
+        _record_sibling_hyper_extracts(tableau_file, project_dir)
 
     # Step 4c: Sources kept beside the workbook (or linked, not embedded)
     if file_results.get('generation'):
@@ -2817,6 +2818,23 @@ def _add_ai_args(parser):
         action='store_false',
         dest='preceptor',
         help='Skip the preceptorship review loop'
+    )
+
+    parser.add_argument(
+        '--no-loss-check',
+        dest='loss_check',
+        action='store_false',
+        default=True,
+        help='Skip the source-vs-output loss check (loss_report.json). '
+             'By default unexplained object loss fails the run.'
+    )
+
+    parser.add_argument(
+        '--allow-fidelity-fail',
+        action='store_true',
+        default=False,
+        help='With --validate-data: do not fail the run when data equivalence '
+             'fidelity is below 80%% (the result is still written to data_validation.json).'
     )
 
     parser.add_argument(
@@ -4317,7 +4335,7 @@ def _run_data_validation(args, source_basename):
         project_dir = os.path.join(out_base, source_basename)
         if not os.path.isdir(project_dir):
             print("  ⚠ Data validation skipped: project directory not found")
-            return
+            return None
 
         extract_dir = _get_extract_dir()
 
@@ -4352,9 +4370,11 @@ def _run_data_validation(args, source_basename):
         with open(report_path, 'w', encoding='utf-8') as fh:
             json.dump(report, fh, indent=2, ensure_ascii=False)
         print(f"    Report: {report_path}")
+        return report
     except Exception as exc:
         print(f"  ⚠ Data validation error: {exc}")
         logger.warning("Data validation failed: %s", exc)
+        return None
 
 
 def _run_multi_tenant_deploy(args, project_dir):
@@ -6636,6 +6656,36 @@ def _run_verify_open(args, source_basename):
     return _run_openability_gate(project_dir)
 
 
+def _run_loss_check(args, source_basename):
+    """Compare the source workbook's objects with the generated project.
+
+    Writes loss_report.json. Returns False only on unexplained loss.
+    """
+    out_base = args.output_dir or os.path.join('artifacts', 'powerbi_projects', 'migrated')
+    project_dir = os.path.join(out_base, source_basename)
+    if not os.path.isdir(project_dir):
+        print("  ⚠ Loss check skipped: project directory not found")
+        return True
+    try:
+        from powerbi_import.loss_report import build_loss_report, write_loss_report
+    except ImportError:
+        from loss_report import build_loss_report, write_loss_report
+
+    report = build_loss_report(args.tableau_file, project_dir)
+    if report.get('status') == 'not_run':
+        print(f"  ⚠ Loss check skipped: {report.get('reason')}")
+        return True
+    write_loss_report(report, project_dir)
+
+    print(f"\n  Loss check: {report['status']}"
+          f" ({report.get('unexplained_drops', 0)} unexplained drop(s))")
+    for row in report['rows']:
+        if row['status'] != 'pass':
+            print(f"      • {row['object']}: source {row['source']} → output "
+                  f"{row['output']} ({row['status']})")
+    return report['status'] != 'fail'
+
+
 def _run_preceptor(args, source_basename):
     """Preceptorship review loop: score the generated project and coach on gaps.
 
@@ -7438,6 +7488,50 @@ def _hyper_to_csv_files(hyper_path, out_dir, prefix, _csv):
         pass
 
     return results
+
+
+def _record_sibling_hyper_extracts(tableau_file, project_dir):
+    """Record .hyper extracts beside an unpacked .twb as not-read degradations.
+
+    A .twb read directly never sees its ``Data/Extracts`` hyper files, so the
+    converter cannot read them. Without this, the loss is silent: the metadata
+    says nothing and the loss check has nothing to explain. Here each file is
+    listed as ``not_read`` and named under ``degradations.hyper_unread``.
+    """
+    try:
+        from powerbi_import.loss_report import sibling_hyper_files
+    except ImportError:
+        from loss_report import sibling_hyper_files
+
+    hyper = sibling_hyper_files(tableau_file)
+    if not hyper:
+        return
+    meta_path = os.path.join(project_dir, 'migration_metadata.json')
+    if not os.path.isfile(meta_path):
+        return
+    try:
+        with open(meta_path, 'r', encoding='utf-8') as fh:
+            meta = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return
+
+    names = [os.path.basename(h) for h in hyper]
+    existing = {e.get('filename') for e in meta.get('hyper_extracts', [])}
+    for name in names:
+        if name not in existing:
+            meta.setdefault('hyper_extracts', []).append({
+                'filename': name,
+                'format': 'unknown',
+                'row_count': 0,
+                'status': 'not_read',
+                'source': 'sibling of .twb (not read by the .twb path)',
+            })
+    deg = meta.setdefault('degradations', {})
+    unread = set(deg.get('hyper_unread', [])) | set(names)
+    deg['hyper_unread'] = sorted(unread)
+    with open(meta_path, 'w', encoding='utf-8') as fh:
+        json.dump(meta, fh, indent=2)
+    print(f"  ⚠ {len(names)} .hyper extract(s) beside the .twb are not read: {', '.join(names)}")
 
 
 def _fix_twb_data_folder(project_dir, source_basename):
@@ -8576,6 +8670,7 @@ def _extract_twbx_data_files(args, source_basename):
         # Batch mode has always done this; a single .twb was left pointing at
         # a folder that does not exist, with no hint of where to put the data.
         _fix_twb_data_folder(project_dir, source_basename)
+        _record_sibling_hyper_extracts(source, project_dir)
     _collect_local_data_files(source, project_dir, source_basename)
     _convert_hyper_to_csv_in_data(
         os.path.join(project_dir, 'Data'), source_basename, project_dir)
@@ -9152,7 +9247,16 @@ def _run_single_migration(args):
     # Step 3f2c: Data equivalence validation (--validate-data flag)
     if (getattr(args, 'validate_data', False) and results.get('generation')
             and not args.dry_run):
-        _run_data_validation(args, source_basename)
+        equivalence = _run_data_validation(args, source_basename)
+        if (equivalence and equivalence.get('status') == 'fail'
+                and not getattr(args, 'allow_fidelity_fail', False)):
+            checkpoint.mark('validation', 'failed', check='equivalence')
+            progress.fail(
+                f"Data equivalence: fidelity {equivalence.get('fidelity_percent', 0):.1f}% "
+                f"is below the 80% floor (use --allow-fidelity-fail to override)")
+            return ExitCode.VALIDATION_FAILED
+        if equivalence:
+            checkpoint.mark('validation', check='equivalence')
 
     # Step 3f3: Static openability gate (enabled by default; --no-verify-open to skip)
     if (getattr(args, 'verify_open', True)
@@ -9163,6 +9267,18 @@ def _run_single_migration(args):
             progress.fail("Openability preflight: project would NOT open in PBI Desktop")
             return ExitCode.VALIDATION_FAILED
         checkpoint.mark('validation', check='openability')
+
+    # Step 3f3b: Source-vs-output loss report (enabled by default; --no-loss-check to skip).
+    # Unexplained object loss (relations, hyper extracts, ...) fails the run.
+    if (getattr(args, 'loss_check', True)
+            and getattr(args, 'output_format', 'pbip') == 'pbip'
+            and getattr(args, 'tableau_file', None)
+            and results.get('generation') and not args.dry_run):
+        if not _run_loss_check(args, source_basename):
+            checkpoint.mark('validation', 'failed', check='loss')
+            progress.fail("Loss check: objects dropped without a recorded degradation")
+            return ExitCode.VALIDATION_FAILED
+        checkpoint.mark('validation', check='loss')
 
     # Step 3f4: Best-effort real Desktop open self-check (explicit --desktop-probe only)
     if getattr(args, 'desktop_probe', False) and results.get('generation') and not args.dry_run:

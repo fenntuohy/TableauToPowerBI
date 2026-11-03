@@ -361,8 +361,33 @@ def _check_tmdl_present(project_dir) -> CheckResult:
     return CheckResult("tmdl_present", True, "error", [])
 
 
+# Markers of a placeholder partition. These are matched by content, never by
+# length: a stub is recognised by what it says, so a short but real query
+# (a DATATABLE parameter table, a CALENDAR date table) is never flagged.
+#   - the TODO the converter writes when it has no real data source
+#   - an empty-row #table(...) left by the self-heal placeholder injector
+_M_STUB_TODO = "TODO: Replace with actual"
+_M_EMPTY_TABLE = re.compile(r"#table\s*\(\s*\{[^{}]*\}\s*,\s*\{\s*\}\s*\)")
+
+
+def _m_stub_problems(m_expr: str) -> List[str]:
+    """Return why a partition is a placeholder, or [] when it holds real data."""
+    problems = []
+    if _M_STUB_TODO in m_expr:
+        problems.append("placeholder partition: no real data source "
+                        "(the converter's TODO marker is still present)")
+    if _M_EMPTY_TABLE.search(m_expr):
+        problems.append("placeholder partition: #table() has no rows, so the "
+                        "table loads empty")
+    return problems
+
+
 def _check_power_query(project_dir) -> CheckResult:
-    """Validate every M partition — the Power Query generation focus."""
+    """Validate every M partition — the Power Query generation focus.
+
+    Syntax validity is not enough: an empty ``#table`` parses cleanly but
+    loads no data, so placeholder partitions are reported as errors too.
+    """
     issues = []
     for tmdl in _tmdl_files(project_dir):
         try:
@@ -372,17 +397,29 @@ def _check_power_query(project_dir) -> CheckResult:
         for name, m_expr in extract_m_partitions(text):
             if not m_expr.strip():
                 continue
+            where = f"{os.path.relpath(tmdl, project_dir)} :: partition '{name}'"
             for problem in validate_m_query(m_expr):
-                issues.append(f"{os.path.relpath(tmdl, project_dir)} :: "
-                              f"partition '{name}': {problem}")
+                issues.append(f"{where}: {problem}")
+            for problem in _m_stub_problems(m_expr):
+                issues.append(f"{where}: {problem}")
     return CheckResult("power_query", not issues, "error", issues)
+
+
+# Written by the DAX converter when a Tableau expression could not be translated.
+# The stub is valid DAX (BLANK()), so syntax checks pass it; it must be flagged here.
+CONVERSION_FAILURE_MARKER = "DAX conversion failed"
 
 
 def _check_dax(project_dir) -> CheckResult:
     issues = []
     for tmdl in _tmdl_files(project_dir):
         try:
-            for line in _read(tmdl).splitlines():
+            for lineno, line in enumerate(_read(tmdl).splitlines(), 1):
+                if CONVERSION_FAILURE_MARKER in line and _MEASURE_RE.match(line):
+                    issues.append(
+                        f"{os.path.relpath(tmdl, project_dir)}:{lineno}: measure is a "
+                        f"BLANK() stub for an untranslated Tableau expression")
+                    continue
                 m = _MEASURE_RE.match(line)
                 if not m:
                     continue

@@ -10,10 +10,11 @@ You are the **Reviewer** agent for the Tableau to Power BI migration project. Yo
 ## Your Files (You Own These)
 
 - `powerbi_import/preceptor.py` — Preceptorship loop engine (review scoring, coaching feedback, cycle tracking)
+- `powerbi_import/loss_report.py` — Source-vs-output object-count loss check (`loss_report.json`; unexplained drops fail the run)
 
 ## Read-Only Access
 
-You can READ any source file and any generated artifact to perform quality reviews, but you ONLY WRITE to `powerbi_import/preceptor.py` and review report outputs.
+You can READ any source file and any generated artifact to perform quality reviews, but you ONLY WRITE to `powerbi_import/preceptor.py`, `powerbi_import/loss_report.py` and review report outputs.
 
 ## The Preceptorship Loop
 

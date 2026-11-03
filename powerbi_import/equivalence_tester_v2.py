@@ -295,9 +295,23 @@ class DataQualityValidator:
 #: Tableau pseudo-fields. They drive shelf behaviour rather than naming data,
 #: so they have no model equivalent and must not count as missing coverage.
 _PSEUDO_FIELDS = frozenset({
-    'Measure Names', 'Measure Values',
+    'Measure Names', 'Measure Values', 'Multiple Values',
     'Number of Records', 'Latitude (generated)', 'Longitude (generated)',
 })
+
+
+def _clean_field_ref(name: str) -> str:
+    """Strip Tableau reference decoration so a field can be matched by name.
+
+    ``:Measure Names`` (a leading colon), ``my:BALANCE_MONTH`` (a namespace
+    prefix) and ``\\% Defaults`` (an escaped backslash) all name one field.
+    """
+    value = str(name).strip().strip('[]').lstrip('\\').lstrip(':')
+    if ':' in value and not value.startswith(':'):
+        head, _, tail = value.partition(':')
+        if head.isalnum() and len(head) <= 4:  # namespace such as "my", "none"
+            value = tail
+    return value.strip()
 
 
 def _read_generated_model(pbi_artifact: Dict) -> Optional[Dict]:
@@ -333,6 +347,38 @@ def _read_generated_model(pbi_artifact: Dict) -> Optional[Dict]:
     if not tables:
         return None
     return {'tables': tables, 'columns': columns, 'measures': measures}
+
+
+def _resolve_model_name(name: str, model_names: set, calc_captions: dict) -> str:
+    """Return the model name a Tableau field maps to (or the name unchanged).
+
+    Tries, in order: the name as-is, its humanised form (TOTAL_EVENTS ->
+    Total Events), then the caption of a Tableau internal calc
+    (Calculation_123 -> GCID Drop Rate).
+    """
+    if name in model_names:
+        return name
+    human = _humanise_field(name)
+    if human in model_names:
+        return human
+    caption = calc_captions.get(name)
+    if caption is None:
+        return name
+    # The model keeps a caption's exact spelling, including trailing spaces
+    # ("GCID rate "), so try the caption as-is before any stripped form.
+    for candidate in (caption, caption.strip(), caption + ' '):
+        if candidate in model_names:
+            return candidate
+    return name
+
+
+def _humanise_field(name: str) -> str:
+    """Name a column takes in the model: underscores become spaces, title case.
+
+    Matches the generated ``RenameColumns`` step for raw names such as
+    ``TOTAL_EVENTS`` -> ``Total Events``.
+    """
+    return re.sub(r'\s+', ' ', str(name).replace('_', ' ')).strip().title()
 
 
 def _normalize_symbol_name(name: Any) -> str:
@@ -408,6 +454,18 @@ def run_full_equivalence_suite(tableau_export: Dict, pbi_artifact: Dict,
         })
 
     # Test 3: fields a worksheet uses should exist in the model
+    calc_captions = {}
+    for calc in tableau_export.get('calculations', []) or []:
+        raw = str(calc.get('name', '')).strip('[]')
+        cap = str(calc.get('caption', '') or '')
+        if raw and cap:
+            calc_captions[raw] = cap
+    for ds in tableau_export.get('datasources', []) or []:
+        for calc in ds.get('calculations', []) or []:
+            raw = str(calc.get('name', '')).strip('[]')
+            cap = str(calc.get('caption', '') or '')
+            if raw and cap:
+                calc_captions.setdefault(raw, cap)
     for ws in tableau_export.get('worksheets', []):
         ws_name = ws.get('name', 'Unknown')
         tableau_fields = set()
@@ -415,10 +473,19 @@ def run_full_equivalence_suite(tableau_export: Dict, pbi_artifact: Dict,
             if isinstance(field, dict):
                 name = field.get('name')
                 if name:
-                    tableau_fields.add(str(name).strip('[]'))
+                    tableau_fields.add(_clean_field_ref(name))
             elif field:
-                tableau_fields.add(str(field).strip('[]'))
+                tableau_fields.add(_clean_field_ref(field))
         tableau_fields -= _PSEUDO_FIELDS
+        # The generated model renames a column to its humanised form
+        # (SOURCE_SYSTEM_NAME -> "Source System Name"). Accept that form as the
+        # same field, otherwise every renamed column reads as missing.
+        # Resolve each Tableau field to the one name the model uses for it, so
+        # every field counts once in the denominator. Expanding the set with
+        # alternate names double-counted fields and understated coverage.
+        tableau_fields = {
+            _resolve_model_name(f, model_names, calc_captions) for f in tableau_fields
+        }
         if not tableau_fields:
             continue
         if model is None:

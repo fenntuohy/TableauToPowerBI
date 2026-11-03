@@ -1,0 +1,222 @@
+{
+  "BigQuery_Analytics": {
+    "dax_stubs": 0,
+    "loss_status": "pass",
+    "output": {
+      "calculated_fields": 11,
+      "dashboards": 1,
+      "filters": 0,
+      "hyper_extracts": 0,
+      "parameters": 0,
+      "relations": 3,
+      "worksheets": 4
+    },
+    "source": {
+      "calculated_fields": 10,
+      "dashboards": 1,
+      "filters": 0,
+      "hyper_extracts": 0,
+      "parameters": 0,
+      "relations": 1,
+      "worksheets": 4
+    }
+  },
+  "Complex_Enterprise": {
+    "dax_stubs": 0,
+    "loss_status": "pass",
+    "output": {
+      "calculated_fields": 35,
+      "dashboards": 3,
+      "filters": 7,
+      "hyper_extracts": 0,
+      "parameters": 5,
+      "relations": 6,
+      "worksheets": 12
+    },
+    "source": {
+      "calculated_fields": 33,
+      "dashboards": 3,
+      "filters": 7,
+      "hyper_extracts": 0,
+      "parameters": 0,
+      "relations": 3,
+      "worksheets": 12
+    }
+  },
+  "Enterprise_Sales": {
+    "dax_stubs": 0,
+    "loss_status": "pass",
+    "output": {
+      "calculated_fields": 27,
+      "dashboards": 1,
+      "filters": 0,
+      "hyper_extracts": 0,
+      "parameters": 3,
+      "relations": 3,
+      "worksheets": 4
+    },
+    "source": {
+      "calculated_fields": 22,
+      "dashboards": 1,
+      "filters": 0,
+      "hyper_extracts": 0,
+      "parameters": 0,
+      "relations": 1,
+      "worksheets": 4
+    }
+  },
+  "Financial_Report": {
+    "dax_stubs": 0,
+    "loss_status": "pass",
+    "output": {
+      "calculated_fields": 6,
+      "dashboards": 1,
+      "filters": 4,
+      "hyper_extracts": 0,
+      "parameters": 2,
+      "relations": 1,
+      "worksheets": 4
+    },
+    "source": {
+      "calculated_fields": 6,
+      "dashboards": 1,
+      "filters": 4,
+      "hyper_extracts": 0,
+      "parameters": 0,
+      "relations": 0,
+      "worksheets": 4
+    }
+  },
+  "HR_Analytics": {
+    "dax_stubs": 0,
+    "loss_status": "pass",
+    "output": {
+      "calculated_fields": 4,
+      "dashboards": 1,
+      "filters": 0,
+      "hyper_extracts": 0,
+      "parameters": 0,
+      "relations": 1,
+      "worksheets": 4
+    },
+    "source": {
+      "calculated_fields": 4,
+      "dashboards": 1,
+      "filters": 0,
+      "hyper_extracts": 0,
+      "parameters": 0,
+      "relations": 0,
+      "worksheets": 4
+    }
+  },
+  "Manufacturing_IoT": {
+    "dax_stubs": 0,
+    "loss_status": "pass",
+    "output": {
+      "calculated_fields": 25,
+      "dashboards": 2,
+      "filters": 0,
+      "hyper_extracts": 0,
+      "parameters": 2,
+      "relations": 6,
+      "worksheets": 6
+    },
+    "source": {
+      "calculated_fields": 25,
+      "dashboards": 2,
+      "filters": 0,
+      "hyper_extracts": 0,
+      "parameters": 0,
+      "relations": 2,
+      "worksheets": 6
+    }
+  },
+  "Marketing_Campaign": {
+    "dax_stubs": 0,
+    "loss_status": "pass",
+    "output": {
+      "calculated_fields": 29,
+      "dashboards": 1,
+      "filters": 0,
+      "hyper_extracts": 0,
+      "parameters": 2,
+      "relations": 3,
+      "worksheets": 4
+    },
+    "source": {
+      "calculated_fields": 25,
+      "dashboards": 1,
+      "filters": 0,
+      "hyper_extracts": 0,
+      "parameters": 0,
+      "relations": 1,
+      "worksheets": 4
+    }
+  },
+  "Security_Test": {
+    "dax_stubs": 0,
+    "loss_status": "pass",
+    "output": {
+      "calculated_fields": 5,
+      "dashboards": 1,
+      "filters": 0,
+      "hyper_extracts": 0,
+      "parameters": 0,
+      "relations": 2,
+      "worksheets": 2
+    },
+    "source": {
+      "calculated_fields": 5,
+      "dashboards": 1,
+      "filters": 0,
+      "hyper_extracts": 0,
+      "parameters": 0,
+      "relations": 0,
+      "worksheets": 2
+    }
+  },
+  "Superstore_Sales": {
+    "dax_stubs": 0,
+    "loss_status": "pass",
+    "output": {
+      "calculated_fields": 4,
+      "dashboards": 1,
+      "filters": 0,
+      "hyper_extracts": 0,
+      "parameters": 0,
+      "relations": 3,
+      "worksheets": 3
+    },
+    "source": {
+      "calculated_fields": 4,
+      "dashboards": 1,
+      "filters": 0,
+      "hyper_extracts": 0,
+      "parameters": 0,
+      "relations": 2,
+      "worksheets": 3
+    }
+  },
+  "Ventes_France": {
+    "dax_stubs": 0,
+    "loss_status": "pass",
+    "output": {
+      "calculated_fields": 24,
+      "dashboards": 2,
+      "filters": 0,
+      "hyper_extracts": 0,
+      "parameters": 3,
+      "relations": 5,
+      "worksheets": 6
+    },
+    "source": {
+      "calculated_fields": 22,
+      "dashboards": 2,
+      "filters": 0,
+      "hyper_extracts": 0,
+      "parameters": 0,
+      "relations": 2,
+      "worksheets": 6
+    }
+  }
+}

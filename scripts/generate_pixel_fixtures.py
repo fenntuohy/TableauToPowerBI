@@ -142,9 +142,12 @@ def snapshot_project(pbip_dir: str) -> dict:
 
 def migrate_workbook(twb_path: str, out_dir: str) -> str:
     """Run migrate.py for *twb_path*, returning the generated project dir."""
+    # --no-loss-check: this harness records visual attributes of whatever is
+    # generated. A workbook with known object loss must still produce output
+    # to snapshot; the loss gate is a user-facing policy, not a fixture concern.
     cmd = [
         sys.executable, os.path.join(_REPO_ROOT, "migrate.py"),
-        twb_path, "--output-dir", out_dir, "--quiet",
+        twb_path, "--output-dir", out_dir, "--quiet", "--no-loss-check",
     ]
     subprocess.run(cmd, cwd=_REPO_ROOT, check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
